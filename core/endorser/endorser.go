@@ -302,17 +302,17 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	// at first, we check whether the message is valid
 	prop, hdr, hdrExt, err := validation.ValidateProposalMessage(signedProp)
 	if err != nil {
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	chdr, err := putils.UnmarshalChannelHeader(hdr.ChannelHeader)
 	if err != nil {
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	shdr, err := putils.GetSignatureHeader(hdr.SignatureHeader)
 	if err != nil {
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	// block invocations to security-sensitive system chaincodes
@@ -320,7 +320,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 		endorserLogger.Errorf("ProcessProposal error: an attempt was made by %#v to invoke system chaincode %s",
 			shdr.Creator, hdrExt.ChaincodeId.Name)
 		err = fmt.Errorf("Chaincode %s cannot be invoked through a proposal", hdrExt.ChaincodeId.Name)
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	chainID := chdr.ChannelId
@@ -331,7 +331,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	txid := chdr.TxId
 	if txid == "" {
 		err = errors.New("Invalid txID. It must be different from the empty string.")
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	if chainID != "" {
@@ -349,7 +349,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 		if !syscc.IsSysCC(hdrExt.ChaincodeId.Name) {
 			// check that the proposal complies with the channel's writers
 			if err = e.checkACL(signedProp, chdr, shdr, hdrExt); err != nil {
-				return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+				return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 			}
 		}
 	} else {
@@ -366,10 +366,10 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	var historyQueryExecutor ledger.HistoryQueryExecutor
 	if chainID != "" {
 		if txsim, err = e.getTxSimulator(chainID); err != nil {
-			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 		}
 		if historyQueryExecutor, err = e.getHistoryQueryExecutor(chainID); err != nil {
-			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 		}
 		// Add the historyQueryExecutor to context
 		// TODO shouldn't we also add txsim to context here as well? Rather than passing txsim parameter
@@ -388,7 +388,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	//1 -- simulate
 	cd, res, simulationResult, ccevent, err := e.simulateProposal(ctx, chainID, txid, signedProp, prop, hdrExt.ChaincodeId, txsim)
 	if err != nil {
-		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 	}
 
 	//2 -- endorse and get a marshalled ProposalResponse message
@@ -401,7 +401,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	} else {
 		pResp, err = e.endorseProposal(ctx, chainID, txid, signedProp, prop, res, simulationResult, ccevent, hdrExt.PayloadVisibility, hdrExt.ChaincodeId, txsim, cd)
 		if err != nil {
-			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
+			return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, nil
 		}
 	}
 
