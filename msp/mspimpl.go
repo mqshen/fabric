@@ -500,10 +500,12 @@ func (msp *bccspmsp) Validate(id Identity) error {
 			found := false
 
 			for _, OU := range id.GetOrganizationalUnits() {
+				mspLogger.Errorf("get msp organization %s from identifier", OU.OrganizationalUnitIdentifier)
 				certificationIDs, exists := msp.ouIdentifiers[OU.OrganizationalUnitIdentifier]
 
 				if exists {
-					for _, certificationID := range certificationIDs {
+					for x, certificationID := range certificationIDs {
+						mspLogger.Errorf("get cert id: %s ", string(x))
 						if bytes.Equal(certificationID, OU.CertifiersIdentifier) {
 							found = true
 							break
@@ -764,6 +766,7 @@ func (msp *bccspmsp) setupOUs(conf m.FabricMSPConfig) error {
 	msp.ouIdentifiers = make(map[string][][]byte)
 	for _, ou := range conf.OrganizationalUnitIdentifiers {
 		// 1. check that it registered in msp.rootCerts or msp.intermediateCerts
+		mspLogger.Errorf("start setup ou for [%s]", ou.OrganizationalUnitIdentifier)
 		cert, err := msp.getCertFromPem(ou.Certificate)
 		if err != nil {
 			return fmt.Errorf("Failed getting certificate for [%v]: [%s]", ou, err)

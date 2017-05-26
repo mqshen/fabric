@@ -322,7 +322,7 @@ func (handler *Handler) handleTransaction(msg *pb.ChaincodeMessage) {
 		}
 
 		// Send COMPLETED message to chaincode support and change state
-		chaincodeLogger.Debugf("[%s]Transaction completed. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_COMPLETED)
+		chaincodeLogger.Errorf("[%s]Transaction completed. Sending %s, payload: %s", shorttxid(msg.Txid), pb.ChaincodeMessage_COMPLETED, string(resBytes))
 		nextStateMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: resBytes, Txid: msg.Txid, ChaincodeEvent: stub.chaincodeEvent}
 	}()
 }

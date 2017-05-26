@@ -1,3 +1,5 @@
 OrganizationalUnitIdentifiers:
   - Certificate: "cacerts/cacert.pem"
     OrganizationalUnitIdentifier: "COP"
+  - Certificate: "cacerts/ca-cert.pem"
+    OrganizationalUnitIdentifier: "fabric-server"

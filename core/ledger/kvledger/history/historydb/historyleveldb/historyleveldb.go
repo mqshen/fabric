@@ -28,6 +28,7 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/hyperledger/fabric/protos/common"
 	putils "github.com/hyperledger/fabric/protos/utils"
+	"runtime/debug"
 )
 
 var logger = flogging.MustGetLogger("historyleveldb")
@@ -83,6 +84,7 @@ func (historyDB *historyDB) Close() {
 
 // Commit implements method in HistoryDB interface
 func (historyDB *historyDB) Commit(block *common.Block) error {
+	debug.PrintStack()
 
 	blockNo := block.Header.Number
 	//Set the starting tranNo to 0

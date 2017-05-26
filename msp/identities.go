@@ -85,6 +85,7 @@ func (id *identity) GetOrganizationalUnits() []*OUIdentifier {
 
 	res := []*OUIdentifier{}
 	for _, unit := range id.cert.Subject.OrganizationalUnit {
+		mspLogger.Errorf("get organization %s from identifier", unit)
 		res = append(res, &OUIdentifier{
 			OrganizationalUnitIdentifier: unit,
 			CertifiersIdentifier:         cid,
