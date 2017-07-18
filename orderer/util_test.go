@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	config "github.com/hyperledger/fabric/orderer/localconfig"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateLedgerFactory(t *testing.T) {
@@ -103,4 +104,23 @@ func TestCreateSubDir(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ParentDirNotExists", func(t *testing.T) {
+		assert.Panics(t, func() { createSubDir(os.TempDir(), "foo/name") })
+	})
+}
+
+func TestCreateTempDir(t *testing.T) {
+	t.Run("Good", func(t *testing.T) {
+		tempDir := createTempDir("foo")
+		if _, err := os.Stat(tempDir); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("Bad", func(t *testing.T) {
+		assert.Panics(t, func() {
+			createTempDir("foo/bar")
+		})
+	})
+
 }

@@ -1,41 +1,29 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package node
 
 import (
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
-	genesisconfig "github.com/hyperledger/fabric/common/configtx/tool/localconfig"
-	"github.com/hyperledger/fabric/common/configtx/tool/provisional"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/localmsp"
-	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/config"
 	"github.com/hyperledger/fabric/core/endorser"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
@@ -46,7 +34,7 @@ import (
 	"github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/peer/common"
 	peergossip "github.com/hyperledger/fabric/peer/gossip"
-	cb "github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/peer/version"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -54,13 +42,16 @@ import (
 	"google.golang.org/grpc/grpclog"
 )
 
+//function used by chaincode support
+type ccEndpointFunc func() (*pb.PeerEndpoint, error)
+
 var chaincodeDevMode bool
 var peerDefaultChain bool
 var orderingEndpoint string
 
 // XXXDefaultChannelMSPID should not be defined in production code
 // It should only be referenced in tests.  However, it is necessary
-// to support the 'default chain' setup so temporarilly adding until
+// to support the 'default chain' setup so temporarily adding until
 // this concept can be removed to testing scenarios only
 const XXXDefaultChannelMSPID = "DEFAULT"
 
@@ -69,7 +60,7 @@ func startCmd() *cobra.Command {
 	flags := nodeStartCmd.Flags()
 	flags.BoolVarP(&chaincodeDevMode, "peer-chaincodedev", "", false,
 		"Whether peer in chaincode development mode")
-	flags.BoolVarP(&peerDefaultChain, "peer-defaultchain", "", true,
+	flags.BoolVarP(&peerDefaultChain, "peer-defaultchain", "", false,
 		"Whether to start peer with chain testchainid")
 	flags.StringVarP(&orderingEndpoint, "orderer", "o", "orderer:7050", "Ordering service endpoint")
 
@@ -93,8 +84,9 @@ func initSysCCs() {
 }
 
 func serve(args []string) error {
+	logger.Infof("Starting %s", version.GetInfo())
 	ledgermgmt.Initialize()
-	// Parameter overrides must be processed before any paramaters are
+	// Parameter overrides must be processed before any parameters are
 	// cached. Failures to cache cause the server to terminate immediately.
 	if chaincodeDevMode {
 		logger.Info("Running in chaincode development mode")
@@ -138,7 +130,12 @@ func serve(args []string) error {
 		grpclog.Fatalf("Failed to create ehub server: %v", err)
 	}
 
-	registerChaincodeSupport(peerServer.Server())
+	// enable the cache of chaincode info
+	ccprovider.EnableCCInfoCache()
+
+	ccSrv, ccEpFunc := createChaincodeServer(peerServer, listenAddr)
+	registerChaincodeSupport(ccSrv.Server(), ccEpFunc)
+	go ccSrv.Start()
 
 	logger.Debugf("Running peer")
 
@@ -166,57 +163,29 @@ func serve(args []string) error {
 	// callback function for secure dial options for gossip service
 	secureDialOpts := func() []grpc.DialOption {
 		var dialOpts []grpc.DialOption
+		// set max send/recv msg sizes
+		dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(comm.MaxRecvMsgSize()),
+			grpc.MaxCallSendMsgSize(comm.MaxSendMsgSize())))
+		// set the keepalive options
+		dialOpts = append(dialOpts, comm.ClientKeepaliveOptions()...)
+
 		if comm.TLSEnabled() {
-			dialOpts = append(dialOpts, grpc.WithTransportCredentials(comm.GetCASupport().GetPeerCredentials()))
+			tlsCert := peerServer.ServerCertificate()
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(comm.GetCASupport().GetPeerCredentials(tlsCert)))
 		} else {
 			dialOpts = append(dialOpts, grpc.WithInsecure())
 		}
 		return dialOpts
 	}
-	service.InitGossipService(serializedIdentity, peerEndpoint.Address, peerServer.Server(),
+	err = service.InitGossipService(serializedIdentity, peerEndpoint.Address, peerServer.Server(),
 		messageCryptoService, secAdv, secureDialOpts, bootstrap...)
+	if err != nil {
+		return err
+	}
 	defer service.GetGossipService().Stop()
 
 	//initialize system chaincodes
 	initSysCCs()
-
-	// Begin startup of default chain
-	if peerDefaultChain {
-		if orderingEndpoint == "" {
-			logger.Panic("No ordering service endpoint provided, please use -o option.")
-		}
-
-		if len(strings.Split(orderingEndpoint, ":")) != 2 {
-			logger.Panicf("Invalid format of ordering service endpoint, %s.", orderingEndpoint)
-		}
-
-		chainID := util.GetTestChainID()
-
-		var block *cb.Block
-
-		func() {
-			defer func() {
-				if err := recover(); err != nil {
-					logger.Fatalf("Peer configured to start with the default test chain, but supporting configuration files did not match.  Please ensure that configtx.yaml contains the unmodified SampleSingleMSPSolo profile and that sampleconfig/msp is present.\n%s", err)
-				}
-			}()
-
-			genConf := genesisconfig.Load(genesisconfig.SampleSingleMSPSoloProfile)
-			genConf.Orderer.Addresses = []string{orderingEndpoint}
-			genConf.Application.Organizations[0].Name = XXXDefaultChannelMSPID
-			genConf.Application.Organizations[0].ID = XXXDefaultChannelMSPID
-			block = provisional.New(genConf).GenesisBlockForChannel(chainID)
-		}()
-
-		//this creates testchainid and sets up gossip
-		if err = peer.CreateChainFromBlock(block); err == nil {
-			logger.Infof("create chain [%s]", chainID)
-			scc.DeploySysCCs(chainID)
-			logger.Infof("Deployed system chaincodes on %s", chainID)
-		} else {
-			logger.Errorf("create default chain [%s] failed with %s", chainID, err)
-		}
-	}
 
 	//this brings up all the chains (including testchainid)
 	peer.Initialize(func(cid string) {
@@ -288,27 +257,92 @@ func serve(args []string) error {
 	return <-serve
 }
 
+//create a CC listener using peer.chaincodeListenAddress (and if that's not set use peer.peerAddress)
+func createChaincodeServer(peerServer comm.GRPCServer, peerListenAddress string) (comm.GRPCServer, ccEndpointFunc) {
+	cclistenAddress := viper.GetString("peer.chaincodeListenAddress")
+
+	var srv comm.GRPCServer
+	var ccEpFunc ccEndpointFunc
+
+	//use the chaincode address endpoint function..
+	//three cases
+	// -  peer.chaincodeListenAddress not specied (use peer's server)
+	// -  peer.chaincodeListenAddress identical to peer.listenAddress (use peer's server)
+	// -  peer.chaincodeListenAddress different and specified (create chaincode server)
+	if cclistenAddress == "" {
+		//...but log a warning
+		logger.Warningf("peer.chaincodeListenAddress is not set, use peer.listenAddress %s", peerListenAddress)
+
+		//we are using peer address, use peer endpoint
+		ccEpFunc = peer.GetPeerEndpoint
+		srv = peerServer
+	} else if cclistenAddress == peerListenAddress {
+		//using peer's endpoint...log a  warning
+		logger.Warningf("peer.chaincodeListenAddress is identical to peer.listenAddress %s", cclistenAddress)
+
+		//we are using peer address, use peer endpoint
+		ccEpFunc = peer.GetPeerEndpoint
+		srv = peerServer
+	} else {
+		config, err := peer.GetSecureConfig()
+		if err != nil {
+			panic(err)
+		}
+
+		srv, err = comm.NewGRPCServer(cclistenAddress, config)
+		if err != nil {
+			panic(err)
+		}
+		ccEpFunc = getChaincodeAddressEndpoint
+	}
+
+	return srv, ccEpFunc
+}
+
 //NOTE - when we implment JOIN we will no longer pass the chainID as param
 //The chaincode support will come up without registering system chaincodes
 //which will be registered only during join phase.
-func registerChaincodeSupport(grpcServer *grpc.Server) {
+func registerChaincodeSupport(grpcServer *grpc.Server, ccEpFunc ccEndpointFunc) {
 	//get user mode
 	userRunsCC := chaincode.IsDevMode()
 
 	//get chaincode startup timeout
-	tOut, err := strconv.Atoi(viper.GetString("chaincode.startuptimeout"))
-	if err != nil { //what went wrong ?
-		logger.Warning("could not retrieve timeout var...setting to 5secs")
-		tOut = 5000
+	ccStartupTimeout := viper.GetDuration("chaincode.startuptimeout")
+	if ccStartupTimeout < time.Duration(5)*time.Second {
+		logger.Warningf("Invalid chaincode startup timeout value %s (should be at least 5s); defaulting to 5s", ccStartupTimeout)
+		ccStartupTimeout = time.Duration(5) * time.Second
+	} else {
+		logger.Debugf("Chaincode startup timeout value set to %s", ccStartupTimeout)
 	}
-	ccStartupTimeout := time.Duration(tOut) * time.Millisecond
 
-	ccSrv := chaincode.NewChaincodeSupport(peer.GetPeerEndpoint, userRunsCC, ccStartupTimeout)
+	ccSrv := chaincode.NewChaincodeSupport(ccEpFunc, userRunsCC, ccStartupTimeout)
 
 	//Now that chaincode is initialized, register all system chaincodes.
 	scc.RegisterSysCCs()
 
 	pb.RegisterChaincodeSupportServer(grpcServer, ccSrv)
+}
+
+func getChaincodeAddressEndpoint() (*pb.PeerEndpoint, error) {
+	//need this for the ID to create chaincode endpoint
+	peerEndpoint, err := peer.GetPeerEndpoint()
+	if err != nil {
+		return nil, err
+	}
+
+	ccendpoint := viper.GetString("peer.chaincodeListenAddress")
+	if ccendpoint == "" {
+		return nil, fmt.Errorf("peer.chaincodeListenAddress not specified")
+	}
+
+	if _, _, err = net.SplitHostPort(ccendpoint); err != nil {
+		return nil, err
+	}
+
+	return &pb.PeerEndpoint{
+		Id:      peerEndpoint.Id,
+		Address: ccendpoint,
+	}, nil
 }
 
 func createEventHubServer(secureConfig comm.SecureServerConfig) (comm.GRPCServer, error) {
@@ -326,7 +360,7 @@ func createEventHubServer(secureConfig comm.SecureServerConfig) (comm.GRPCServer
 	}
 	ehServer := producer.NewEventsServer(
 		uint(viper.GetInt("peer.events.buffersize")),
-		viper.GetInt("peer.events.timeout"))
+		viper.GetDuration("peer.events.timeout"))
 
 	pb.RegisterEventsServer(grpcServer.Server(), ehServer)
 	return grpcServer, nil
@@ -338,33 +372,11 @@ func writePid(fileName string, pid int) error {
 		return err
 	}
 
-	fd, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
-	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("can't lock '%s', lock is held", fd.Name())
-	}
-
-	if _, err := fd.Seek(0, 0); err != nil {
+	buf := strconv.Itoa(pid)
+	if err = ioutil.WriteFile(fileName, []byte(buf), 0644); err != nil {
+		logger.Errorf("Cannot write pid to %s (err:%s)", fileName, err)
 		return err
 	}
 
-	if err := fd.Truncate(0); err != nil {
-		return err
-	}
-
-	if _, err := fmt.Fprintf(fd, "%d", pid); err != nil {
-		return err
-	}
-
-	if err := fd.Sync(); err != nil {
-		return err
-	}
-
-	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_UN); err != nil {
-		return fmt.Errorf("can't release lock '%s', lock is held", fd.Name())
-	}
 	return nil
 }

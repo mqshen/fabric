@@ -17,16 +17,16 @@ limitations under the License.
 package msp
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
-	"fmt"
-
-	"path/filepath"
-
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/core/config"
 	"github.com/hyperledger/fabric/protos/msp"
 	"github.com/stretchr/testify/assert"
@@ -122,8 +122,8 @@ func TestMSPSetupNoCryptoConf(t *testing.T) {
 func TestGetters(t *testing.T) {
 	typ := localMsp.GetType()
 	assert.Equal(t, typ, FABRIC)
-	assert.NotNil(t, localMsp.GetRootCerts())
-	assert.NotNil(t, localMsp.GetIntermediateCerts())
+	assert.NotNil(t, localMsp.GetTLSRootCerts())
+	assert.NotNil(t, localMsp.GetTLSIntermediateCerts())
 }
 
 func TestMSPSetupBad(t *testing.T) {
@@ -144,6 +144,34 @@ func TestDoubleSetup(t *testing.T) {
 	// note that we've already called setup once on this
 	err := mspMgr.Setup(nil)
 	assert.NoError(t, err)
+}
+
+type bccspNoKeyLookupKS struct {
+	bccsp.BCCSP
+}
+
+func (*bccspNoKeyLookupKS) GetKey(ski []byte) (k bccsp.Key, err error) {
+	return nil, errors.New("not found")
+}
+
+func TestNotFoundInBCCSP(t *testing.T) {
+	dir, err := config.GetDevMspDir()
+	assert.NoError(t, err)
+	conf, err := GetLocalMspConfig(dir, nil, "DEFAULT")
+
+	assert.NoError(t, err)
+
+	thisMSP, err := NewBccspMsp()
+	assert.NoError(t, err)
+	ks, err := sw.NewFileBasedKeyStore(nil, filepath.Join(dir, "keystore"), true)
+	assert.NoError(t, err)
+	csp, err := sw.New(256, "SHA2", ks)
+	assert.NoError(t, err)
+	thisMSP.(*bccspmsp).bccsp = &bccspNoKeyLookupKS{csp}
+
+	err = thisMSP.Setup(conf)
+	assert.Error(t, err)
+	assert.Contains(t, "KeyMaterial not found in SigningIdentityInfo", err.Error())
 }
 
 func TestGetIdentities(t *testing.T) {
@@ -178,7 +206,7 @@ func TestGetSigningIdentityFromVerifyingMSP(t *testing.T) {
 		os.Exit(-1)
 	}
 
-	conf, err = GetVerifyingMspConfig(mspDir, nil, "DEFAULT")
+	conf, err = GetVerifyingMspConfig(mspDir, "DEFAULT")
 	if err != nil {
 		fmt.Printf("Setup should have succeeded, got err %s instead", err)
 		os.Exit(-1)
@@ -238,6 +266,22 @@ func TestValidateCAIdentity(t *testing.T) {
 	caID := getIdentity(t, cacerts)
 
 	err := localMsp.Validate(caID)
+	assert.Error(t, err)
+}
+
+func TestBadAdminIdentity(t *testing.T) {
+	conf, err := GetLocalMspConfig("testdata/badadmin", nil, "DEFAULT")
+	assert.NoError(t, err)
+
+	thisMSP, err := NewBccspMsp()
+	assert.NoError(t, err)
+	ks, err := sw.NewFileBasedKeyStore(nil, filepath.Join("testdata/badadmin", "keystore"), true)
+	assert.NoError(t, err)
+	csp, err := sw.New(256, "SHA2", ks)
+	assert.NoError(t, err)
+	thisMSP.(*bccspmsp).bccsp = csp
+
+	err = thisMSP.Setup(conf)
 	assert.Error(t, err)
 }
 
@@ -316,26 +360,6 @@ func TestIdentitiesGetters(t *testing.T) {
 	assert.NotNil(t, mspid)
 }
 
-func TestUnimplementedMethods(t *testing.T) {
-	id, err := localMsp.GetDefaultSigningIdentity()
-	if err != nil {
-		t.Fatalf("GetSigningIdentity should have succeeded, got err %s", err)
-		return
-	}
-
-	// these methods are currently unimplemented - we assert that they return an error
-	err = id.VerifyOpts(nil, nil, SignatureOpts{})
-	assert.Error(t, err)
-	err = id.VerifyAttributes(nil, nil)
-	assert.Error(t, err)
-	_, err = id.SignOpts(nil, SignatureOpts{})
-	assert.Error(t, err)
-	_, err = id.GetAttributeProof(nil)
-	assert.Error(t, err)
-	err = id.Renew()
-	assert.Error(t, err)
-}
-
 func TestSignAndVerify(t *testing.T) {
 	id, err := localMsp.GetDefaultSigningIdentity()
 	if err != nil {
@@ -383,7 +407,7 @@ func TestSignAndVerify(t *testing.T) {
 func TestSignAndVerifyFailures(t *testing.T) {
 	msg := []byte("foo")
 
-	id, err := localMsp.GetDefaultSigningIdentity()
+	id, err := localMspBad.GetDefaultSigningIdentity()
 	if err != nil {
 		t.Fatalf("GetSigningIdentity should have succeeded")
 		return
@@ -484,7 +508,7 @@ func TestGetOU(t *testing.T) {
 }
 
 func TestGetOUFail(t *testing.T) {
-	id, err := localMsp.GetDefaultSigningIdentity()
+	id, err := localMspBad.GetDefaultSigningIdentity()
 	if err != nil {
 		t.Fatalf("GetSigningIdentity should have succeeded")
 		return
@@ -808,6 +832,9 @@ func TestIdentityPolicyPrincipalFails(t *testing.T) {
 
 var conf *msp.MSPConfig
 var localMsp MSP
+
+// Required because deleting the cert or msp options from localMsp causes parallel tests to fail
+var localMspBad MSP
 var mspMgr MSPManager
 
 func TestMain(m *testing.M) {
@@ -830,7 +857,19 @@ func TestMain(m *testing.M) {
 		os.Exit(-1)
 	}
 
+	localMspBad, err = NewBccspMsp()
+	if err != nil {
+		fmt.Printf("Constructor for msp should have succeeded, got err %s instead", err)
+		os.Exit(-1)
+	}
+
 	err = localMsp.Setup(conf)
+	if err != nil {
+		fmt.Printf("Setup for msp should have succeeded, got err %s instead", err)
+		os.Exit(-1)
+	}
+
+	err = localMspBad.Setup(conf)
 	if err != nil {
 		fmt.Printf("Setup for msp should have succeeded, got err %s instead", err)
 		os.Exit(-1)
@@ -840,6 +879,23 @@ func TestMain(m *testing.M) {
 	err = mspMgr.Setup([]MSP{localMsp})
 	if err != nil {
 		fmt.Printf("Setup for msp manager should have succeeded, got err %s instead", err)
+		os.Exit(-1)
+	}
+
+	id, err := localMsp.GetIdentifier()
+	if err != nil {
+		fmt.Println("Failed obtaining identifier for localMSP")
+		os.Exit(-1)
+	}
+
+	msps, err := mspMgr.GetMSPs()
+	if err != nil {
+		fmt.Println("Failed obtaining MSPs from MSP manager")
+		os.Exit(-1)
+	}
+
+	if msps[id] == nil {
+		fmt.Println("Couldn't find localMSP in MSP manager")
 		os.Exit(-1)
 	}
 
@@ -858,4 +914,22 @@ func getIdentity(t *testing.T, path string) Identity {
 	assert.NoError(t, err)
 
 	return id
+}
+
+func getLocalMSP(t *testing.T, dir string) MSP {
+	conf, err := GetLocalMspConfig(dir, nil, "DEFAULT")
+	assert.NoError(t, err)
+
+	thisMSP, err := NewBccspMsp()
+	assert.NoError(t, err)
+	ks, err := sw.NewFileBasedKeyStore(nil, filepath.Join(dir, "keystore"), true)
+	assert.NoError(t, err)
+	csp, err := sw.New(256, "SHA2", ks)
+	assert.NoError(t, err)
+	thisMSP.(*bccspmsp).bccsp = csp
+
+	err = thisMSP.Setup(conf)
+	assert.NoError(t, err)
+
+	return thisMSP
 }

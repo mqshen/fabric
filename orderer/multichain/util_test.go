@@ -48,6 +48,10 @@ type mockChain struct {
 	done     chan struct{}
 }
 
+func (mch *mockChain) Errored() <-chan struct{} {
+	return nil
+}
+
 func (mch *mockChain) Enqueue(env *cb.Envelope) bool {
 	mch.queue <- env
 	return true
@@ -74,14 +78,6 @@ func (mch *mockChain) Halt() {
 	close(mch.queue)
 }
 
-type mockLedgerWriter struct {
-}
-
-func (mlw *mockLedgerWriter) Append(blockContents []*cb.Envelope, metadata [][]byte) *cb.Block {
-	logger.Debugf("Committed block")
-	return nil
-}
-
 func makeConfigTx(chainID string, i int) *cb.Envelope {
 	group := cb.NewConfigGroup()
 	group.Groups[config.OrdererGroupKey] = cb.NewConfigGroup()
@@ -93,7 +89,7 @@ func makeConfigTx(chainID string, i int) *cb.Envelope {
 	if err != nil {
 		panic(err)
 	}
-	return makeConfigTxFromConfigUpdateEnvelope(chainID, configEnv, false)
+	return makeConfigTxFromConfigUpdateEnvelope(chainID, configEnv)
 }
 
 func wrapConfigTx(env *cb.Envelope) *cb.Envelope {
@@ -104,30 +100,18 @@ func wrapConfigTx(env *cb.Envelope) *cb.Envelope {
 	return result
 }
 
-func makeConfigTxFromConfigUpdateEnvelope(chainID string, configUpdateEnv *cb.ConfigUpdateEnvelope, newChannel bool) *cb.Envelope {
+func makeConfigTxFromConfigUpdateEnvelope(chainID string, configUpdateEnv *cb.ConfigUpdateEnvelope) *cb.Envelope {
 	configUpdateTx, err := utils.CreateSignedEnvelope(cb.HeaderType_CONFIG_UPDATE, chainID, mockCrypto(), configUpdateEnv, msgVersion, epoch)
 	if err != nil {
 		panic(err)
 	}
-
-	configEnv := &cb.ConfigEnvelope{
-		Config: &cb.Config{
-			Sequence:     1,
-			ChannelGroup: configtx.UnmarshalConfigUpdateOrPanic(configUpdateEnv.ConfigUpdate).WriteSet,
-		},
-		LastUpdate: configUpdateTx,
-	}
-
-	if newChannel {
-		configEnv = configtx.FixNewChannelConfig(configEnv)
-	}
-
-	configTx, err := utils.CreateSignedEnvelope(cb.HeaderType_CONFIG, chainID, mockCrypto(), configEnv,
+	configTx, err := utils.CreateSignedEnvelope(cb.HeaderType_CONFIG, chainID, mockCrypto(), &cb.ConfigEnvelope{
+		Config:     &cb.Config{Sequence: 1, ChannelGroup: configtx.UnmarshalConfigUpdateOrPanic(configUpdateEnv.ConfigUpdate).WriteSet},
+		LastUpdate: configUpdateTx},
 		msgVersion, epoch)
 	if err != nil {
 		panic(err)
 	}
-
 	return configTx
 }
 
@@ -139,21 +123,6 @@ func makeNormalTx(chainID string, i int) *cb.Envelope {
 				ChannelId: chainID,
 			}),
 			SignatureHeader: utils.MarshalOrPanic(&cb.SignatureHeader{}),
-		},
-		Data: []byte(fmt.Sprintf("%d", i)),
-	}
-	return &cb.Envelope{
-		Payload: utils.MarshalOrPanic(payload),
-	}
-}
-
-func makeSignaturelessTx(chainID string, i int) *cb.Envelope {
-	payload := &cb.Payload{
-		Header: &cb.Header{
-			ChannelHeader: utils.MarshalOrPanic(&cb.ChannelHeader{
-				Type:      int32(cb.HeaderType_ENDORSER_TRANSACTION),
-				ChannelId: chainID,
-			}),
 		},
 		Data: []byte(fmt.Sprintf("%d", i)),
 	}

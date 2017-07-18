@@ -28,7 +28,7 @@ const (
 
 	GroupPrefix  = "[Groups] "
 	ValuePrefix  = "[Values] "
-	PolicyPrefix = "[Policy] " // The plurarility doesn't match, but, it makes the logs much easier being the same lenght as "Groups" and "Values"
+	PolicyPrefix = "[Policy] " // The plurarility doesn't match, but, it makes the logs much easier being the same length as "Groups" and "Values"
 
 	PathSeparator = "/"
 )
@@ -59,8 +59,7 @@ func addToMap(cg comparable, result map[string]comparable) error {
 		fqPath = PolicyPrefix
 	}
 
-	// TODO rename validateChainID to validateConfigID
-	if err := validateChainID(cg.key); err != nil {
+	if err := validateConfigID(cg.key); err != nil {
 		return fmt.Errorf("Illegal characters in key: %s", fqPath)
 	}
 

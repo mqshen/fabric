@@ -1,10 +1,10 @@
-Building the fabric
--------------------
+Building Hyperledger Fabric
+---------------------------
 
 The following instructions assume that you have already set up your
 :doc:`development environment <devenv>`.
 
-To build the Fabric:
+To build Hyperledger Fabric:
 
 ::
 
@@ -21,6 +21,14 @@ Use the following sequence to run all unit tests
     cd $GOPATH/src/github.com/hyperledger/fabric
     make unit-test
 
+To run a subset of tests, set the TEST_PKGS environment variable.
+Specify a list of packages (separated by space), for example:
+
+::
+
+    export TEST_PKGS="github.com/hyperledger/fabric/core/ledger/..."
+    make unit-test
+
 To run a specific test use the ``-run RE`` flag where RE is a regular
 expression that matches the test case name. To run tests with verbose
 output use the ``-v`` flag. For example, to run the ``TestGetFoo`` test
@@ -30,6 +38,8 @@ call/excecute
 ::
 
     go test -v -run=TestGetFoo
+
+
 
 Running Node.js Unit Tests
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -153,5 +163,9 @@ library.
 The available log levels in order of increasing verbosity are: *CRITICAL
 \| ERROR \| WARNING \| NOTICE \| INFO \| DEBUG*
 
-See :doc:`specific logging control <../Setup/logging-control>`
-instructions when running the peer process.
+See the :doc:`logging-control` document for
+instructions on tweaking the level of log messages to output when running
+the various Hyperledger Fabric components.
+
+.. Licensed under Creative Commons Attribution 4.0 International License
+   https://creativecommons.org/licenses/by/4.0/

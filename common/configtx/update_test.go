@@ -118,6 +118,12 @@ func TestVerifyDeltaSet(t *testing.T) {
 
 		assert.Error(t, cm.verifyDeltaSet(deltaSet, nil), "Policy evaluation should have failed")
 	})
+
+	t.Run("Empty delta set", func(t *testing.T) {
+		err := (&configManager{}).verifyDeltaSet(map[string]comparable{}, nil)
+		assert.Error(t, err, "Empty delta set should be rejected")
+		assert.Contains(t, err.Error(), "Delta set was empty.  Update would have no effect.")
+	})
 }
 
 func TestPolicyForItem(t *testing.T) {
@@ -155,7 +161,7 @@ func TestPolicyForItem(t *testing.T) {
 			ModPolicy: "rootPolicy",
 		},
 	})
-	assert.False(t, ok, "Should not have found rootPolicy off a non-existant manager")
+	assert.False(t, ok, "Should not have found rootPolicy off a non-existent manager")
 
 	policy, ok = cm.policyForItem(comparable{
 		path: []string{"root", "foo"},

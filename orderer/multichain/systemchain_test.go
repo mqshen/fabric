@@ -17,6 +17,7 @@ limitations under the License.
 package multichain
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -28,11 +29,10 @@ import (
 	"github.com/hyperledger/fabric/orderer/common/filter"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
+	logging "github.com/op/go-logging"
 
 	"github.com/stretchr/testify/assert"
 )
-
-var newChannelID = "newChannel"
 
 type mockSupport struct {
 	msc *mockconfig.Orderer
@@ -73,94 +73,330 @@ func (mcc *mockChainCreator) NewChannelConfig(envConfigUpdate *cb.Envelope) (con
 	if mcc.NewChannelConfigErr != nil {
 		return nil, mcc.NewChannelConfigErr
 	}
-
-	pldConfigUpdate := utils.UnmarshalPayloadOrPanic(envConfigUpdate.Payload)
-	configUpdateEnv := configtx.UnmarshalConfigUpdateEnvelopeOrPanic(pldConfigUpdate.Data)
-	configUpdate := configtx.UnmarshalConfigUpdateOrPanic(configUpdateEnv.ConfigUpdate)
-
-	configEnvelopeVal := &cb.ConfigEnvelope{
-		Config: &cb.Config{ChannelGroup: configUpdate.WriteSet},
-	}
-
-	proposeConfigUpdateVal := configEnvelopeVal
-	proposeConfigUpdateVal.Config.Sequence = 1
-	proposeConfigUpdateVal.LastUpdate = envConfigUpdate
-
-	ctxm := &mockconfigtx.Manager{
-		ConfigEnvelopeVal:      configEnvelopeVal,
-		ProposeConfigUpdateVal: proposeConfigUpdateVal,
-	}
-
-	return ctxm, nil
+	confUpdate := configtx.UnmarshalConfigUpdateOrPanic(configtx.UnmarshalConfigUpdateEnvelopeOrPanic(utils.UnmarshalPayloadOrPanic(envConfigUpdate.Payload).Data).ConfigUpdate)
+	return &mockconfigtx.Manager{
+		ConfigEnvelopeVal: &cb.ConfigEnvelope{
+			Config:     &cb.Config{Sequence: 1, ChannelGroup: confUpdate.WriteSet},
+			LastUpdate: envConfigUpdate,
+		},
+	}, nil
 }
 
 func TestGoodProposal(t *testing.T) {
+	newChainID := "new-chain-id"
+
 	mcc := newMockChainCreator()
 
-	configUpdateEnv, _ := configtx.NewCompositeTemplate(
+	configEnv, err := configtx.NewCompositeTemplate(
 		configtx.NewSimpleTemplate(
 			config.DefaultHashingAlgorithm(),
 			config.DefaultBlockDataHashingStructure(),
 			config.TemplateOrdererAddresses([]string{"foo"}),
 		),
 		configtx.NewChainCreationTemplate("SampleConsortium", []string{}),
-	).Envelope(newChannelID)
+	).Envelope(newChainID)
+	assert.Nil(t, err, "Error constructing configtx")
 
-	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChannelID, configUpdateEnv, true)
-	ordererTx := wrapConfigTx(ingressTx)
+	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChainID, configEnv)
+	wrapped := wrapConfigTx(ingressTx)
 
 	sysFilter := newSystemChainFilter(mcc.ms, mcc)
-	action, committer := sysFilter.Apply(ordererTx)
+	action, committer := sysFilter.Apply(wrapped)
+
 	assert.EqualValues(t, action, filter.Accept, "Did not accept valid transaction")
 	assert.True(t, committer.Isolated(), "Channel creation belong in its own block")
 
 	committer.Commit()
 	assert.Len(t, mcc.newChains, 1, "Proposal should only have created 1 new chain")
+
 	assert.Equal(t, ingressTx, mcc.newChains[0], "New chain should have been created with ingressTx")
 }
 
 func TestProposalRejectedByConfig(t *testing.T) {
+	newChainID := "NewChainID"
+
 	mcc := newMockChainCreator()
 	mcc.NewChannelConfigErr = fmt.Errorf("Error creating channel")
 
-	configUpdateEnv, _ := configtx.NewCompositeTemplate(
+	configEnv, err := configtx.NewCompositeTemplate(
 		configtx.NewSimpleTemplate(
 			config.DefaultHashingAlgorithm(),
 			config.DefaultBlockDataHashingStructure(),
 			config.TemplateOrdererAddresses([]string{"foo"}),
 		),
 		configtx.NewChainCreationTemplate("SampleConsortium", []string{}),
-	).Envelope(newChannelID)
-
-	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChannelID, configUpdateEnv, true)
-	ordererTx := wrapConfigTx(ingressTx)
+	).Envelope(newChainID)
+	if err != nil {
+		t.Fatalf("Error constructing configtx")
+	}
+	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChainID, configEnv)
+	wrapped := wrapConfigTx(ingressTx)
 
 	sysFilter := newSystemChainFilter(mcc.ms, mcc)
-	action, _ := sysFilter.Apply(ordererTx)
+	action, _ := sysFilter.Apply(wrapped)
 
-	assert.EqualValues(t, action, filter.Reject, "Did not reject invalid transaction")
+	assert.EqualValues(t, action, filter.Reject, "Did not accept valid transaction")
 	assert.Len(t, mcc.newChains, 0, "Proposal should not have created a new chain")
 }
 
 func TestNumChainsExceeded(t *testing.T) {
+	newChainID := "NewChainID"
+
 	mcc := newMockChainCreator()
 	mcc.ms.msc.MaxChannelsCountVal = 1
 	mcc.newChains = make([]*cb.Envelope, 2)
 
-	configUpdateEnv, _ := configtx.NewCompositeTemplate(
+	configEnv, err := configtx.NewCompositeTemplate(
 		configtx.NewSimpleTemplate(
 			config.DefaultHashingAlgorithm(),
 			config.DefaultBlockDataHashingStructure(),
 			config.TemplateOrdererAddresses([]string{"foo"}),
 		),
 		configtx.NewChainCreationTemplate("SampleConsortium", []string{}),
-	).Envelope(newChannelID)
-
-	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChannelID, configUpdateEnv, true)
-	ordererTx := wrapConfigTx(ingressTx)
+	).Envelope(newChainID)
+	if err != nil {
+		t.Fatalf("Error constructing configtx")
+	}
+	ingressTx := makeConfigTxFromConfigUpdateEnvelope(newChainID, configEnv)
+	wrapped := wrapConfigTx(ingressTx)
 
 	sysFilter := newSystemChainFilter(mcc.ms, mcc)
-	action, _ := sysFilter.Apply(ordererTx)
+	action, _ := sysFilter.Apply(wrapped)
 
 	assert.EqualValues(t, filter.Reject, action, "Transaction had created too many channels")
+}
+
+func TestBadProposal(t *testing.T) {
+	mcc := newMockChainCreator()
+	sysFilter := newSystemChainFilter(mcc.ms, mcc)
+	// logging.SetLevel(logging.DEBUG, "orderer/multichain")
+	t.Run("BadPayload", func(t *testing.T) {
+		action, committer := sysFilter.Apply(&cb.Envelope{Payload: []byte("bad payload")})
+		assert.EqualValues(t, action, filter.Forward, "Should of skipped invalid tx")
+		assert.Nil(t, committer)
+	})
+
+	// set logger to logger with a backend that writes to a byte buffer
+	var buffer bytes.Buffer
+	logger.SetBackend(logging.AddModuleLevel(logging.NewLogBackend(&buffer, "", 0)))
+	// reset the logger after test
+	defer func() {
+		logger = logging.MustGetLogger("orderer/multichain")
+	}()
+
+	for _, tc := range []struct {
+		name    string
+		payload *cb.Payload
+		action  filter.Action
+		regexp  string
+	}{
+		{
+			"MissingPayloadHeader",
+			&cb.Payload{},
+			filter.Forward,
+			"",
+		},
+		{
+			"BadChannelHeader",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: []byte("bad channel header"),
+				},
+			},
+			filter.Forward,
+			"",
+		},
+		{
+			"BadConfigTx",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: []byte("bad configTx"),
+			},
+			filter.Reject,
+			"",
+		},
+		{
+			"BadConfigTxPayload",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: []byte("bad payload"),
+					},
+				),
+			},
+			filter.Reject,
+			"Error unmarshaling envelope payload",
+		},
+		{
+			"MissingConfigTxChannelHeader",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: utils.MarshalOrPanic(
+							&cb.Payload{},
+						),
+					},
+				),
+			},
+			filter.Reject,
+			"Not a config transaction",
+		},
+		{
+			"BadConfigTxChannelHeader",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: utils.MarshalOrPanic(
+							&cb.Payload{
+								Header: &cb.Header{
+									ChannelHeader: []byte("bad channel header"),
+								},
+							},
+						),
+					},
+				),
+			},
+			filter.Reject,
+			"Error unmarshaling channel header",
+		},
+		{
+			"BadConfigTxChannelHeaderType",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: utils.MarshalOrPanic(
+							&cb.Payload{
+								Header: &cb.Header{
+									ChannelHeader: utils.MarshalOrPanic(
+										&cb.ChannelHeader{
+											Type: 0xBad,
+										},
+									),
+								},
+							},
+						),
+					},
+				),
+			},
+			filter.Reject,
+			"Not a config transaction",
+		},
+		{
+			"BadConfigEnvelope",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: utils.MarshalOrPanic(
+							&cb.Payload{
+								Header: &cb.Header{
+									ChannelHeader: utils.MarshalOrPanic(
+										&cb.ChannelHeader{
+											Type: int32(cb.HeaderType_CONFIG),
+										},
+									),
+								},
+								Data: []byte("bad config update"),
+							},
+						),
+					},
+				),
+			},
+			filter.Reject,
+			"Error unmarshalling config envelope from payload",
+		},
+		{
+			"MissingConfigEnvelopeLastUpdate",
+			&cb.Payload{
+				Header: &cb.Header{
+					ChannelHeader: utils.MarshalOrPanic(
+						&cb.ChannelHeader{
+							Type: int32(cb.HeaderType_ORDERER_TRANSACTION),
+						},
+					),
+				},
+				Data: utils.MarshalOrPanic(
+					&cb.Envelope{
+						Payload: utils.MarshalOrPanic(
+							&cb.Payload{
+								Header: &cb.Header{
+									ChannelHeader: utils.MarshalOrPanic(
+										&cb.ChannelHeader{
+											Type: int32(cb.HeaderType_CONFIG),
+										},
+									),
+								},
+								Data: utils.MarshalOrPanic(
+									&cb.ConfigEnvelope{},
+								),
+							},
+						),
+					},
+				),
+			},
+			filter.Reject,
+			"Must include a config update",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buffer.Reset()
+			action, committer := sysFilter.Apply(&cb.Envelope{Payload: utils.MarshalOrPanic(tc.payload)})
+			assert.EqualValues(t, tc.action, action, "Expected tx to be %sed, but instead the tx will be %sed.", filterActionToString(tc.action), filterActionToString(action))
+			assert.Nil(t, committer)
+			assert.Regexp(t, tc.regexp, buffer.String())
+		})
+	}
+}
+
+func filterActionToString(action filter.Action) string {
+	switch action {
+	case filter.Accept:
+		return "accept"
+	case filter.Forward:
+		return "forward"
+	case filter.Reject:
+		return "reject"
+	default:
+		return ""
+	}
 }

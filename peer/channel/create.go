@@ -19,7 +19,6 @@ package channel
 import (
 	"fmt"
 	"io/ioutil"
-	"time"
 
 	"errors"
 
@@ -60,6 +59,12 @@ func createCmd(cf *ChannelCmdFactory) *cobra.Command {
 			return create(cmd, args, cf)
 		},
 	}
+	flagList := []string{
+		"channelID",
+		"file",
+		"timeout",
+	}
+	attachFlags(createCmd, flagList)
 
 	return createCmd
 }
@@ -88,7 +93,7 @@ func createChannelFromConfigTx(configTxFileName string) (*cb.Envelope, error) {
 	return utils.UnmarshalEnvelope(cftx)
 }
 
-func sanityCheckAndSignChannelCreateTx(envConfigUpdate *cb.Envelope) (*cb.Envelope, error) {
+func sanityCheckAndSignConfigTx(envConfigUpdate *cb.Envelope) (*cb.Envelope, error) {
 	payload, err := utils.ExtractPayload(envConfigUpdate)
 	if err != nil {
 		return nil, InvalidCreateTx("bad payload")
@@ -151,14 +156,14 @@ func sendCreateChainTransaction(cf *ChannelCmdFactory) error {
 		}
 	}
 
-	if chCrtEnv, err = sanityCheckAndSignChannelCreateTx(chCrtEnv); err != nil {
+	if chCrtEnv, err = sanityCheckAndSignConfigTx(chCrtEnv); err != nil {
 		return err
 	}
 
 	var broadcastClient common.BroadcastClient
 	broadcastClient, err = cf.BroadcastFactory()
 	if err != nil {
-		return err
+		return fmt.Errorf("Error getting broadcast client: %s", err)
 	}
 
 	defer broadcastClient.Close()
@@ -174,10 +179,8 @@ func executeCreate(cf *ChannelCmdFactory) error {
 		return err
 	}
 
-	time.Sleep(2 * time.Second)
-
 	var block *cb.Block
-	if block, err = cf.DeliverClient.getBlock(); err != nil {
+	if block, err = getGenesisBlock(cf); err != nil {
 		return err
 	}
 
@@ -202,7 +205,7 @@ func create(cmd *cobra.Command, args []string, cf *ChannelCmdFactory) error {
 
 	var err error
 	if cf == nil {
-		cf, err = InitCmdFactory(false)
+		cf, err = InitCmdFactory(EndorserNotRequired, OrdererRequired)
 		if err != nil {
 			return err
 		}

@@ -25,7 +25,7 @@ import (
 // PeerLedgerProvider provides handle to ledger instances
 type PeerLedgerProvider interface {
 	// Create creates a new ledger with the given genesis block.
-	// This function guarentees that the creation of ledger and committing the genesis block would an atomic action
+	// This function guarantees that the creation of ledger and committing the genesis block would an atomic action
 	// The chain id retrieved from the genesis block is treated as a ledger id
 	Create(genesisBlock *common.Block) (PeerLedger, error)
 	// Open opens an already created ledger
@@ -48,12 +48,11 @@ type PeerLedger interface {
 	GetBlockByHash(blockHash []byte) (*common.Block, error)
 	// GetBlockByTxID returns a block which contains a transaction
 	GetBlockByTxID(txID string) (*common.Block, error)
+	// GetTxValidationCodeByTxID returns reason code of transaction validation
+	GetTxValidationCodeByTxID(txID string) (peer.TxValidationCode, error)
 	// NewTxSimulator gives handle to a transaction simulator.
 	// A client can obtain more than one 'TxSimulator's for parallel execution.
 	// Any snapshoting/synchronization should be performed at the implementation level if required
-
-	// GetTxValidationCodeByTxID returns reason code of transaction validation
-	GetTxValidationCodeByTxID(txID string) (peer.TxValidationCode, error)
 	NewTxSimulator() (TxSimulator, error)
 	// NewQueryExecutor gives handle to a query executor.
 	// A client can obtain more than one 'QueryExecutor's for parallel execution.
@@ -120,7 +119,7 @@ type TxSimulator interface {
 	// GetTxSimulationResults encapsulates the results of the transaction simulation.
 	// This should contain enough detail for
 	// - The update in the state that would be caused if the transaction is to be committed
-	// - The environment in which the transaction is executed so as to be able to decide the validity of the enviroment
+	// - The environment in which the transaction is executed so as to be able to decide the validity of the environment
 	//   (at a later time on a different peer) during committing the transactions
 	// Different ledger implementation (or configurations of a single implementation) may want to represent the above two pieces
 	// of information in different way in order to support different data-models or optimize the information representations.

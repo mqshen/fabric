@@ -1,19 +1,8 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
-
 package multichain
 
 import (
@@ -22,6 +11,7 @@ import (
 	"github.com/hyperledger/fabric/common/config"
 	"github.com/hyperledger/fabric/common/configtx"
 	configtxapi "github.com/hyperledger/fabric/common/configtx/api"
+	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/orderer/ledger"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
@@ -56,7 +46,11 @@ type configResources struct {
 }
 
 func (cr *configResources) SharedConfig() config.Orderer {
-	return cr.OrdererConfig()
+	oc, ok := cr.OrdererConfig()
+	if !ok {
+		logger.Panicf("[channel %s] has no orderer configuration", cr.ChainID())
+	}
+	return oc
 }
 
 type ledgerResources struct {
@@ -100,25 +94,25 @@ func NewManagerImpl(ledgerFactory ledger.Factory, consenters map[string]Consente
 	for _, chainID := range existingChains {
 		rl, err := ledgerFactory.GetOrCreate(chainID)
 		if err != nil {
-			logger.Fatalf("Ledger factory reported chainID %s but could not retrieve it: %s", chainID, err)
+			logger.Panicf("Ledger factory reported chainID %s but could not retrieve it: %s", chainID, err)
 		}
 		configTx := getConfigTx(rl)
 		if configTx == nil {
-			logger.Fatalf("Could not find config transaction for chain %s", chainID)
+			logger.Panic("Programming error, configTx should never be nil here")
 		}
 		ledgerResources := ml.newLedgerResources(configTx)
 		chainID := ledgerResources.ChainID()
 
-		if ledgerResources.ConsortiumsConfig() != nil {
+		if _, ok := ledgerResources.ConsortiumsConfig(); ok {
 			if ml.systemChannelID != "" {
-				logger.Fatalf("There appear to be two system chains %s and %s", ml.systemChannelID, chainID)
+				logger.Panicf("There appear to be two system chains %s and %s", ml.systemChannelID, chainID)
 			}
 			chain := newChainSupport(createSystemChainFilters(ml, ledgerResources),
 				ledgerResources,
 				consenters,
 				signer)
 			logger.Infof("Starting with system channel %s and orderer type %s", chainID, chain.SharedConfig().ConsensusType())
-			ml.chains[string(chainID)] = chain
+			ml.chains[chainID] = chain
 			ml.systemChannelID = chainID
 			ml.systemChannel = chain
 			// We delay starting this chain, as it might try to copy and replace the chains map via newChain before the map is fully built
@@ -129,14 +123,14 @@ func NewManagerImpl(ledgerFactory ledger.Factory, consenters map[string]Consente
 				ledgerResources,
 				consenters,
 				signer)
-			ml.chains[string(chainID)] = chain
+			ml.chains[chainID] = chain
 			chain.start()
 		}
 
 	}
 
 	if ml.systemChannelID == "" {
-		logger.Panicf("No system chain found")
+		logger.Panicf("No system chain found.  If bootstrapping, does your system channel contain a consortiums group definition?")
 	}
 
 	return ml
@@ -156,14 +150,14 @@ func (ml *multiLedger) newLedgerResources(configTx *cb.Envelope) *ledgerResource
 	initializer := configtx.NewInitializer()
 	configManager, err := configtx.NewManagerImpl(configTx, initializer, nil)
 	if err != nil {
-		logger.Fatalf("Error creating configtx manager and handlers: %s", err)
+		logger.Panicf("Error creating configtx manager and handlers: %s", err)
 	}
 
 	chainID := configManager.ChainID()
 
 	ledger, err := ml.ledgerFactory.GetOrCreate(chainID)
 	if err != nil {
-		logger.Fatalf("Error getting ledger for %s", chainID)
+		logger.Panicf("Error getting ledger for %s", chainID)
 	}
 
 	return &ledgerResources{
@@ -208,9 +202,18 @@ func (ml *multiLedger) NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxa
 		return nil, fmt.Errorf("Failing initial channel config creation because of config update envelope unmarshaling error: %s", err)
 	}
 
+	if configUpdatePayload.Header == nil {
+		return nil, fmt.Errorf("Failed initial channel config creation because config update header was missing")
+	}
+	channelHeader, err := utils.UnmarshalChannelHeader(configUpdatePayload.Header.ChannelHeader)
+
 	configUpdate, err := configtx.UnmarshalConfigUpdate(configUpdateEnv.ConfigUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("Failing initial channel config creation because of config update unmarshaling error: %s", err)
+	}
+
+	if configUpdate.ChannelId != channelHeader.ChannelId {
+		return nil, fmt.Errorf("Failing initial channel config creation: mismatched channel IDs: '%s' != '%s'", configUpdate.ChannelId, channelHeader.ChannelId)
 	}
 
 	if configUpdate.WriteSet == nil {
@@ -237,8 +240,8 @@ func (ml *multiLedger) NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxa
 	}
 
 	applicationGroup := cb.NewConfigGroup()
-	consortiumsConfig := ml.systemChannel.ConsortiumsConfig()
-	if consortiumsConfig == nil {
+	consortiumsConfig, ok := ml.systemChannel.ConsortiumsConfig()
+	if !ok {
 		return nil, fmt.Errorf("The ordering system channel does not appear to support creating channels")
 	}
 
@@ -262,12 +265,16 @@ func (ml *multiLedger) NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxa
 		return nil, fmt.Errorf("Proposed configuration has no application group members, but consortium contains members")
 	}
 
-	for orgName := range configUpdate.WriteSet.Groups[config.ApplicationGroupKey].Groups {
-		consortiumGroup, ok := systemChannelGroup.Groups[config.ConsortiumsGroupKey].Groups[consortium.Name].Groups[orgName]
-		if !ok {
-			return nil, fmt.Errorf("Attempted to include a member which is not in the consortium")
+	// If the consortium has no members, allow the source request to contain arbitrary members
+	// Otherwise, require that the supplied members are a subset of the consortium members
+	if len(systemChannelGroup.Groups[config.ConsortiumsGroupKey].Groups[consortium.Name].Groups) > 0 {
+		for orgName := range configUpdate.WriteSet.Groups[config.ApplicationGroupKey].Groups {
+			consortiumGroup, ok := systemChannelGroup.Groups[config.ConsortiumsGroupKey].Groups[consortium.Name].Groups[orgName]
+			if !ok {
+				return nil, fmt.Errorf("Attempted to include a member which is not in the consortium")
+			}
+			applicationGroup.Groups[orgName] = consortiumGroup
 		}
-		applicationGroup.Groups[orgName] = consortiumGroup
 	}
 
 	channelGroup := cb.NewConfigGroup()
@@ -296,5 +303,17 @@ func (ml *multiLedger) NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxa
 		},
 	}, msgVersion, epoch)
 
-	return configtx.NewManagerImpl(templateConfig, configtx.NewInitializer(), nil)
+	initializer := configtx.NewInitializer()
+
+	// This is a very hacky way to disable the sanity check logging in the policy manager
+	// for the template configuration, but it is the least invasive near a release
+	pm, ok := initializer.PolicyManager().(*policies.ManagerImpl)
+	if ok {
+		pm.SuppressSanityLogMessages = true
+		defer func() {
+			pm.SuppressSanityLogMessages = false
+		}()
+	}
+
+	return configtx.NewManagerImpl(templateConfig, initializer, nil)
 }

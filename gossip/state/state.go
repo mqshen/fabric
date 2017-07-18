@@ -95,8 +95,6 @@ type GossipStateProviderImpl struct {
 
 	commChan <-chan proto.ReceivedMessage
 
-	mutex sync.RWMutex
-
 	// Queue of payloads which wasn't acquired yet
 	payloads PayloadsBuffer
 
@@ -106,13 +104,13 @@ type GossipStateProviderImpl struct {
 
 	stateRequestCh chan proto.ReceivedMessage
 
-	stateTransferActive int32
-
 	stopCh chan struct{}
 
 	done sync.WaitGroup
 
 	once sync.Once
+
+	stateTransferActive int32
 }
 
 var logger *logging.Logger // package-level logger
@@ -462,9 +460,13 @@ func (s *GossipStateProviderImpl) antiEntropy() {
 				logger.Error("Cannot obtain ledger height, due to", err)
 				continue
 			}
+			if current == 0 {
+				logger.Error("Ledger reported block height of 0 but this should be impossible")
+				continue
+			}
 			max := s.maxAvailableLedgerHeight()
 
-			if current == max {
+			if current-1 >= max {
 				continue
 			}
 
