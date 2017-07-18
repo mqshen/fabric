@@ -162,12 +162,6 @@ linter: buildenv
 	@echo "LINT: Running code checks.."
 	@$(DRUN) $(DOCKER_NS)/fabric-buildenv:$(DOCKER_TAG) ./scripts/golinter.sh
 
-%/chaintool: Makefile
-	@echo "Installing chaintool"
-	@mkdir -p $(@D)
-	cp /home/nginx/chaintool $@
-	chmod +x $@
-
 # We (re)build a package within a docker context but persist the $GOPATH/pkg
 # directory so that subsequent builds are faster
 build/docker/bin/%: $(PROJECT_FILES)
@@ -207,7 +201,6 @@ build/bin/%: $(PROJECT_FILES)
 
 # payload definitions'
 build/image/ccenv/payload:      build/docker/gotools/bin/protoc-gen-go \
-				build/bin/chaintool \
 				build/goshim.tar.bz2
 build/image/javaenv/payload:    build/javashim.tar.bz2 \
 				build/protos.tar.bz2 \

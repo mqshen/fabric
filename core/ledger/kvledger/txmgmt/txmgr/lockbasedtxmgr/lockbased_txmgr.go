@@ -26,7 +26,6 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/validator/statebasedval"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/version"
 	"github.com/hyperledger/fabric/protos/common"
-	"runtime/debug"
 )
 
 var logger = flogging.MustGetLogger("lockbasedtxmgr")
