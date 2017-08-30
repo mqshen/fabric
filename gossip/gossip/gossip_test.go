@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package gossip
@@ -45,6 +35,22 @@ var timeout = time.Second * time.Duration(180)
 
 var testWG = sync.WaitGroup{}
 
+var tests = []func(t *testing.T){
+	TestPull,
+	TestConnectToAnchorPeers,
+	TestMembership,
+	TestDissemination,
+	TestMembershipConvergence,
+	TestMembershipRequestSpoofing,
+	TestDataLeakage,
+	//TestDisseminateAll2All: {},
+	TestIdentityExpiration,
+	TestMultipleOrgEndpointLeakage,
+	TestConfidentiality,
+	TestAnchorPeer,
+	TestBootstrapPeerMisConfiguration,
+}
+
 func init() {
 	util.SetupTestLogging()
 	rand.Seed(int64(time.Now().Second()))
@@ -53,7 +59,10 @@ func init() {
 	discovery.SetAliveExpirationCheckInterval(aliveTimeInterval)
 	discovery.SetAliveExpirationTimeout(aliveTimeInterval * 10)
 	discovery.SetReconnectInterval(aliveTimeInterval)
-	testWG.Add(7)
+	discovery.SetMaxConnAttempts(5)
+	for range tests {
+		testWG.Add(1)
+	}
 	factory.InitFactories(nil)
 	identityExpirationCheckInterval = time.Second
 }
@@ -193,7 +202,7 @@ func (cs *naiveCryptoService) revoke(pkiID common.PKIidType) {
 func bootPeers(portPrefix int, ids ...int) []string {
 	peers := []string{}
 	for _, id := range ids {
-		peers = append(peers, fmt.Sprintf("localhost:%d", (id+portPrefix)))
+		peers = append(peers, fmt.Sprintf("localhost:%d", id+portPrefix))
 	}
 	return peers
 }
@@ -217,10 +226,10 @@ func newGossipInstanceWithCustomMCS(portPrefix int, id int, maxMsgCount int, mcs
 		PublishStateInfoInterval:   time.Duration(1) * time.Second,
 		RequestStateInfoInterval:   time.Duration(1) * time.Second,
 	}
-
-	idMapper := identity.NewIdentityMapper(mcs)
+	selfId := api.PeerIdentityType(conf.InternalEndpoint)
+	idMapper := identity.NewIdentityMapper(mcs, selfId)
 	g := NewGossipServiceWithServer(conf, &orgCryptoService{}, mcs, idMapper,
-		api.PeerIdentityType(conf.InternalEndpoint), nil)
+		selfId, nil)
 
 	return g
 }
@@ -250,16 +259,17 @@ func newGossipInstanceWithOnlyPull(portPrefix int, id int, maxMsgCount int, boot
 	}
 
 	cryptoService := &naiveCryptoService{}
-	idMapper := identity.NewIdentityMapper(cryptoService)
+	selfId := api.PeerIdentityType(conf.InternalEndpoint)
+	idMapper := identity.NewIdentityMapper(cryptoService, selfId)
 
 	g := NewGossipServiceWithServer(conf, &orgCryptoService{}, cryptoService, idMapper,
-		api.PeerIdentityType(conf.InternalEndpoint), nil)
+		selfId, nil)
 	return g
 }
 
 func TestPull(t *testing.T) {
 	t.Parallel()
-
+	defer testWG.Done()
 	portPrefix := 5610
 	t1 := time.Now()
 	// Scenario: Turn off forwarding and use only pull-based gossip.
@@ -355,11 +365,11 @@ func TestPull(t *testing.T) {
 	t.Log("Took", time.Since(t1))
 	atomic.StoreInt32(&stopped, int32(1))
 	fmt.Println("<<<TestPull>>>")
-	testWG.Done()
 }
 
 func TestConnectToAnchorPeers(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	// Scenario: spawn 10 peers, and have them join a channel
 	// of 3 anchor peers that don't exist yet.
 	// Wait 5 seconds, and then spawn a random anchor peer out of the 3.
@@ -423,11 +433,12 @@ func TestConnectToAnchorPeers(t *testing.T) {
 
 	fmt.Println("<<<TestConnectToAnchorPeers>>>")
 	atomic.StoreInt32(&stopped, int32(1))
-	testWG.Done()
+
 }
 
 func TestMembership(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	portPrefix := 4610
 	t1 := time.Now()
 	// Scenario: spawn 20 nodes and a single bootstrap node and then:
@@ -438,7 +449,7 @@ func TestMembership(t *testing.T) {
 	go waitForTestCompletion(&stopped, t)
 
 	n := 10
-	var lastPeer = fmt.Sprintf("localhost:%d", (n + portPrefix))
+	var lastPeer = fmt.Sprintf("localhost:%d", n+portPrefix)
 	boot := newGossipInstance(portPrefix, 0, 100)
 	boot.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	boot.UpdateChannelMetadata([]byte{}, common.ChainID("A"))
@@ -504,11 +515,12 @@ func TestMembership(t *testing.T) {
 	t.Log("Took", time.Since(t1))
 	atomic.StoreInt32(&stopped, int32(1))
 	fmt.Println("<<<TestMembership>>>")
-	testWG.Done()
+
 }
 
 func TestDissemination(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	portPrefix := 3610
 	t1 := time.Now()
 	// Scenario: 20 nodes and a bootstrap node.
@@ -546,7 +558,7 @@ func TestDissemination(t *testing.T) {
 			pI.UpdateChannelMetadata([]byte("bla bla"), common.ChainID("A"))
 		}
 	}
-	var lastPeer = fmt.Sprintf("localhost:%d", (n + portPrefix))
+	var lastPeer = fmt.Sprintf("localhost:%d", n+portPrefix)
 	metaDataUpdated := func() bool {
 		if "bla bla" != string(metadataOfPeer(boot.PeersOfChannel(common.ChainID("A")), lastPeer)) {
 			return false
@@ -619,11 +631,11 @@ func TestDissemination(t *testing.T) {
 	t.Log("Took", time.Since(t1))
 	atomic.StoreInt32(&stopped, int32(1))
 	fmt.Println("<<<TestDissemination>>>")
-	testWG.Done()
 }
 
 func TestMembershipConvergence(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	portPrefix := 2610
 	// Scenario: Spawn 12 nodes and 3 bootstrap peers
 	// but assign each node to its bootstrap peer group modulo 3.
@@ -717,11 +729,11 @@ func TestMembershipConvergence(t *testing.T) {
 	atomic.StoreInt32(&stopped, int32(1))
 	t.Log("Took", time.Since(t1))
 	fmt.Println("<<<TestMembershipConvergence>>>")
-	testWG.Done()
 }
 
 func TestMembershipRequestSpoofing(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	// Scenario: g1, g2, g3 are peers, and g2 is malicious, and wants
 	// to impersonate g3 when sending a membership request to g1.
 	// Expected output: g1 should *NOT* respond to g2,
@@ -759,7 +771,7 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 
 	// Now, create a membership request message
 	memRequestSpoofFactory := func(aliveMsgEnv *proto.Envelope) *proto.SignedGossipMessage {
-		return (&proto.GossipMessage{
+		sMsg, _ := (&proto.GossipMessage{
 			Tag:   proto.GossipMessage_EMPTY,
 			Nonce: uint64(0),
 			Content: &proto.GossipMessage_MemReq{
@@ -769,6 +781,7 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 				},
 			},
 		}).NoopSign()
+		return sMsg
 	}
 	spoofedMemReq := memRequestSpoofFactory(aliveMsg.GetSourceEnvelope())
 	g2.Send(spoofedMemReq.GossipMessage, &comm.RemotePeer{Endpoint: "localhost:2000", PKIID: common.PKIidType("localhost:2000")})
@@ -791,6 +804,7 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 
 func TestDataLeakage(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	portPrefix := 1610
 	// Scenario: spawn some nodes and let them all
 	// establish full membership.
@@ -914,7 +928,6 @@ func TestDataLeakage(t *testing.T) {
 	t.Log("Stop took", time.Since(stopTime))
 	atomic.StoreInt32(&stopped, int32(1))
 	fmt.Println("<<<TestDataLeakage>>>")
-	testWG.Done()
 }
 
 func TestDisseminateAll2All(t *testing.T) {
@@ -922,6 +935,7 @@ func TestDisseminateAll2All(t *testing.T) {
 	// disseminate a block to all nodes.
 	// Ensure all blocks are received
 
+	t.Skip()
 	t.Parallel()
 	portPrefix := 6610
 	stopped := int32(0)
@@ -989,6 +1003,7 @@ func TestDisseminateAll2All(t *testing.T) {
 
 func TestIdentityExpiration(t *testing.T) {
 	t.Parallel()
+	defer testWG.Done()
 	// Scenario: spawn 4 peers and make the MessageCryptoService revoke one of them.
 	// Eventually, the rest of the peers should not be able to communicate with
 	// the revoked peer at all because its identity would seem to them as expired
@@ -1066,8 +1081,8 @@ func createLeadershipMsg(isDeclaration bool, channel common.ChainID, incTime uin
 		IsDeclaration: isDeclaration,
 		PkiId:         pkiid,
 		Timestamp: &proto.PeerTime{
-			IncNumber: incTime,
-			SeqNum:    seqNum,
+			IncNum: incTime,
+			SeqNum: seqNum,
 		},
 	}
 
@@ -1084,6 +1099,10 @@ type goroutinePredicate func(g goroutine) bool
 
 var connectionLeak = func(g goroutine) bool {
 	return searchInStackTrace("comm.(*connection).writeToStream", g.stack)
+}
+
+var connectionLeak2 = func(g goroutine) bool {
+	return searchInStackTrace("comm.(*connection).readFromStream", g.stack)
 }
 
 var runTests = func(g goroutine) bool {
@@ -1107,6 +1126,9 @@ var clientConn = func(g goroutine) bool {
 }
 
 var testingg = func(g goroutine) bool {
+	if len(g.stack) == 0 {
+		return false
+	}
 	return strings.Index(g.stack[len(g.stack)-1], "testing.go") != -1
 }
 
@@ -1122,7 +1144,8 @@ func anyOfPredicates(predicates ...goroutinePredicate) goroutinePredicate {
 }
 
 func shouldNotBeRunningAtEnd(gr goroutine) bool {
-	return !anyOfPredicates(runTests, goExit, testingg, waitForTestCompl, gossipTest, clientConn, connectionLeak)(gr)
+	return !anyOfPredicates(runTests, goExit, testingg, waitForTestCompl, gossipTest,
+		clientConn, connectionLeak, connectionLeak2)(gr)
 }
 
 func ensureGoroutineExit(t *testing.T) {
@@ -1191,7 +1214,7 @@ func getGoRoutines() []goroutine {
 	for _, s := range a {
 		gr := strings.Split(s, "\n")
 		idStr := bytes.TrimPrefix([]byte(gr[0]), []byte("goroutine "))
-		i := (strings.Index(string(idStr), " "))
+		i := strings.Index(string(idStr), " ")
 		if i == -1 {
 			continue
 		}

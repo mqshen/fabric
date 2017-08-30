@@ -18,6 +18,7 @@ package gossip
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -116,14 +117,14 @@ func leaderInvalidationPolicy(thisMsg *LeadershipMessage, thatMsg *LeadershipMes
 }
 
 func compareTimestamps(thisTS *PeerTime, thatTS *PeerTime) common.InvalidationResult {
-	if thisTS.IncNumber == thatTS.IncNumber {
+	if thisTS.IncNum == thatTS.IncNum {
 		if thisTS.SeqNum > thatTS.SeqNum {
 			return common.MessageInvalidates
 		}
 
 		return common.MessageInvalidated
 	}
-	if thisTS.IncNumber < thatTS.IncNumber {
+	if thisTS.IncNum < thatTS.IncNum {
 		return common.MessageInvalidated
 	}
 	return common.MessageInvalidates
@@ -336,10 +337,18 @@ type ConnectionInfo struct {
 	ID       common.PKIidType
 	Auth     *AuthInfo
 	Identity api.PeerIdentityType
+	Endpoint string
 }
 
-func (connInfo *ConnectionInfo) IsAuthenticated() bool {
-	return connInfo.Auth != nil
+// String returns a string representation of this ConnectionInfo
+func (c *ConnectionInfo) String() string {
+	return fmt.Sprintf("%s %v", c.Endpoint, c.ID)
+}
+
+// IsAuthenticated returns whether the connection to the remote peer
+// was authenticated when the handshake took place
+func (c *ConnectionInfo) IsAuthenticated() bool {
+	return c.Auth != nil
 }
 
 // AuthInfo represents the authentication
@@ -353,7 +362,7 @@ type AuthInfo struct {
 // Sign signs a GossipMessage with given Signer.
 // Returns an Envelope on success,
 // panics on failure.
-func (m *SignedGossipMessage) Sign(signer Signer) *Envelope {
+func (m *SignedGossipMessage) Sign(signer Signer) (*Envelope, error) {
 	// If we have a secretEnvelope, don't override it.
 	// Back it up, and restore it later
 	var secretEnvelope *SecretEnvelope
@@ -363,11 +372,11 @@ func (m *SignedGossipMessage) Sign(signer Signer) *Envelope {
 	m.Envelope = nil
 	payload, err := proto.Marshal(m.GossipMessage)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	sig, err := signer(payload)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	e := &Envelope{
@@ -376,19 +385,19 @@ func (m *SignedGossipMessage) Sign(signer Signer) *Envelope {
 		SecretEnvelope: secretEnvelope,
 	}
 	m.Envelope = e
-	return e
+	return e, nil
 }
 
 // NoopSign creates a SignedGossipMessage with a nil signature
-func (m *GossipMessage) NoopSign() *SignedGossipMessage {
+func (m *GossipMessage) NoopSign() (*SignedGossipMessage, error) {
 	signer := func(msg []byte) ([]byte, error) {
 		return nil, nil
 	}
 	sMsg := &SignedGossipMessage{
 		GossipMessage: m,
 	}
-	sMsg.Sign(signer)
-	return sMsg
+	_, err := sMsg.Sign(signer)
+	return sMsg, err
 }
 
 // Verify verifies a signed GossipMessage with a given Verifier.
@@ -444,19 +453,20 @@ func (e *Envelope) ToGossipMessage() (*SignedGossipMessage, error) {
 
 // SignSecret signs the secret payload and creates
 // a secret envelope out of it.
-func (e *Envelope) SignSecret(signer Signer, secret *Secret) {
+func (e *Envelope) SignSecret(signer Signer, secret *Secret) error {
 	payload, err := proto.Marshal(secret)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	sig, err := signer(payload)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	e.SecretEnvelope = &SecretEnvelope{
 		Payload:   payload,
 		Signature: sig,
 	}
+	return nil
 }
 
 // InternalEndpoint returns the internal endpoint
@@ -512,7 +522,7 @@ func (m *SignedGossipMessage) String() string {
 		var isSimpleMsg bool
 		if m.GetStateResponse() != nil {
 			gMsg = fmt.Sprintf("StateResponse with %d items", len(m.GetStateResponse().Payloads))
-		} else if m.IsDataMsg() {
+		} else if m.IsDataMsg() && m.GetDataMsg().Payload != nil {
 			gMsg = m.GetDataMsg().Payload.toString()
 		} else if m.IsDataUpdate() {
 			update := m.GetDataUpdate()
@@ -526,11 +536,33 @@ func (m *SignedGossipMessage) String() string {
 			isSimpleMsg = true
 		}
 		if !isSimpleMsg {
-			desc := fmt.Sprintf("Channel: %v, nonce: %d, tag: %s", m.Channel, m.Nonce, GossipMessage_Tag_name[int32(m.Tag)])
+			desc := fmt.Sprintf("Channel: %s, nonce: %d, tag: %s", string(m.Channel), m.Nonce, GossipMessage_Tag_name[int32(m.Tag)])
 			gMsg = fmt.Sprintf("%s %s", desc, gMsg)
 		}
 	}
 	return fmt.Sprintf("GossipMessage: %v, Envelope: %s", gMsg, env)
+}
+
+func (dd *DataRequest) FormattedDigests() []string {
+	if dd.MsgType == PullMsgType_IDENTITY_MSG {
+		return digestsToHex(dd.Digests)
+	}
+	return dd.Digests
+}
+
+func (dd *DataDigest) FormattedDigests() []string {
+	if dd.MsgType == PullMsgType_IDENTITY_MSG {
+		return digestsToHex(dd.Digests)
+	}
+	return dd.Digests
+}
+
+func digestsToHex(digests []string) []string {
+	a := make([]string, len(digests))
+	for i, dig := range digests {
+		a[i] = hex.EncodeToString([]byte(dig))
+	}
+	return a
 }
 
 // Abs returns abs(a-b)

@@ -23,14 +23,14 @@ import java.util.List;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.hyperledger.fabric.protos.ledger.queryresult.KvQueryResult;
 import org.hyperledger.fabric.protos.ledger.queryresult.KvQueryResult.KV;
 import org.hyperledger.fabric.protos.peer.ChaincodeEventPackage.ChaincodeEvent;
 import org.hyperledger.fabric.protos.peer.ChaincodeShim.QueryResultBytes;
-import org.hyperledger.fabric.protos.peer.ProposalResponsePackage.Response;
+import org.hyperledger.fabric.shim.Chaincode.Response;
 import org.hyperledger.fabric.shim.ChaincodeStub;
 import org.hyperledger.fabric.shim.ledger.CompositeKey;
+import org.hyperledger.fabric.shim.ledger.KeyModification;
 import org.hyperledger.fabric.shim.ledger.KeyValue;
 import org.hyperledger.fabric.shim.ledger.QueryResultsIterator;
 
@@ -39,58 +39,41 @@ import com.google.protobuf.InvalidProtocolBufferException;
 
 class ChaincodeStubImpl implements ChaincodeStub {
 
-	private static Log logger = LogFactory.getLog(ChaincodeStubImpl.class);
-
-	private final String txid;
+	private final String txId;
 	private final Handler handler;
 	private final List<ByteString> args;
 	private ChaincodeEvent event;
 
-	ChaincodeStubImpl(String uuid, Handler handler, List<ByteString> args) {
-		this.txid = uuid;
+	ChaincodeStubImpl(String txId, Handler handler, List<ByteString> args) {
+		this.txId = txId;
 		this.handler = handler;
 		this.args = Collections.unmodifiableList(args);
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getArgs()
-	 */
 	@Override
 	public List<byte[]> getArgs() {
 		return args.stream().map(x -> x.toByteArray()).collect(Collectors.toList());
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getArgsAsStrings()
-	 */
 	@Override
 	public List<String> getStringArgs() {
 		return args.stream().map(x -> x.toStringUtf8()).collect(Collectors.toList());
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getFunction()
-	 */
 	@Override
 	public String getFunction() {
 		return getStringArgs().size() > 0 ? getStringArgs().get(0) : null;
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getParameters()
-	 */
 	@Override
 	public List<String> getParameters() {
 		return getStringArgs().stream().skip(1).collect(toList());
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#setEvent(java.lang.String, byte[])
-	 */
 	@Override
 	public void setEvent(String name, byte[] payload) {
-		if(name == null || name.trim().length() == 0) throw new IllegalArgumentException("Event name cannot be null or empty string.");
-		if(payload != null) {
+		if (name == null || name.trim().length() == 0) throw new IllegalArgumentException("Event name cannot be null or empty string.");
+		if (payload != null) {
 			this.event = ChaincodeEvent.newBuilder()
 					.setEventName(name)
 					.setPayload(ByteString.copyFrom(payload))
@@ -102,53 +85,35 @@ class ChaincodeStubImpl implements ChaincodeStub {
 		}
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getEvent()
-	 */
 	@Override
 	public ChaincodeEvent getEvent() {
 		return event;
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getTxId()
-	 */
 	@Override
 	public String getTxId() {
-		return txid;
+		return txId;
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getState(String)
-	 */
 	@Override
 	public byte[] getState(String key) {
-		return handler.handleGetState(key, txid).toByteArray();
+		return handler.getState(txId, key).toByteArray();
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#putRawState(java.lang.String, com.google.protobuf.ByteString)
-	 */
 	@Override
 	public void putState(String key, byte[] value) {
-		handler.handlePutState(key, ByteString.copyFrom(value), txid);
+		handler.putState(txId, key, ByteString.copyFrom(value));
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#delState(java.lang.String)
-	 */
 	@Override
 	public void delState(String key) {
-		handler.handleDeleteState(key, txid);
+		handler.deleteState(txId, key);
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getStateByRange(java.lang.String, java.lang.String)
-	 */
 	@Override
 	public QueryResultsIterator<KeyValue> getStateByRange(String startKey, String endKey) {
 		return new QueryResultsIteratorImpl<KeyValue>(this.handler, getTxId(),
-				handler.handleGetStateByRange(getTxId(), startKey, endKey),
+				handler.getStateByRange(getTxId(), startKey, endKey),
 				queryResultBytesToKv.andThen(KeyValueImpl::new)
 				);
 	}
@@ -163,54 +128,57 @@ class ChaincodeStubImpl implements ChaincodeStub {
 		};
 	};
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getStateByPartialCompositeKey(java.lang.String)
-	 */
 	@Override
 	public QueryResultsIterator<KeyValue> getStateByPartialCompositeKey(String compositeKey) {
 		return getStateByRange(compositeKey, compositeKey + "\udbff\udfff");
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#createCompositeKey(java.lang.String, java.lang.String[])
-	 */
 	@Override
 	public CompositeKey createCompositeKey(String objectType, String... attributes) {
 		return new CompositeKey(objectType, attributes);
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#splitCompositeKey(java.lang.String)
-	 */
 	@Override
 	public CompositeKey splitCompositeKey(String compositeKey) {
 		return CompositeKey.parseCompositeKey(compositeKey);
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#getQueryResult(java.lang.String)
-	 */
 	@Override
 	public QueryResultsIterator<KeyValue> getQueryResult(String query) {
 		return new QueryResultsIteratorImpl<KeyValue>(this.handler, getTxId(),
-				handler.handleGetQueryResult(getTxId(), query),
+				handler.getQueryResult(getTxId(), query),
 				queryResultBytesToKv.andThen(KeyValueImpl::new)
 				);
 	}
 
-	/* (non-Javadoc)
-	 * @see org.hyperledger.fabric.shim.ChaincodeStub#invokeChaincode(java.lang.String, java.util.List, java.lang.String)
-	 */
+	@Override
+	public QueryResultsIterator<KeyModification> getHistoryForKey(String key) {
+		return new QueryResultsIteratorImpl<KeyModification>(this.handler, getTxId(),
+				handler.getHistoryForKey(getTxId(), key),
+				queryResultBytesToKeyModification.andThen(KeyModificationImpl::new)
+				);
+	}
+
+	private Function<QueryResultBytes, KvQueryResult.KeyModification> queryResultBytesToKeyModification = new Function<QueryResultBytes, KvQueryResult.KeyModification>() {
+		public KvQueryResult.KeyModification apply(QueryResultBytes queryResultBytes) {
+			try {
+				return KvQueryResult.KeyModification.parseFrom(queryResultBytes.getResultBytes());
+			} catch (InvalidProtocolBufferException e) {
+				throw new RuntimeException(e);
+			}
+		};
+	};
+
 	@Override
 	public Response invokeChaincode(final String chaincodeName, final List<byte[]> args, final String channel) {
 		// internally we handle chaincode name as a composite name
 		final String compositeName;
-		if(channel != null && channel.trim().length() > 0) {
+		if (channel != null && channel.trim().length() > 0) {
 			compositeName = chaincodeName + "/" + channel;
 		} else {
 			compositeName = chaincodeName;
 		}
-		return handler.handleInvokeChaincode(compositeName, args, this.txid);
+		return handler.invokeChaincode(this.txId, compositeName, args);
 	}
 
 }

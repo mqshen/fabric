@@ -3,31 +3,22 @@ Error handling
 
 General Overview
 ----------------
-The Fabric error handling framework can be found in the Fabric repository under
-**common/errors**. It defines a new type of error, CallStackError, to use in
-place of the standard error type provided by Go.
+The Hyperledger Fabric error handling framework can be found in the source
+repository under **common/errors**. It defines a new type of error,
+CallStackError, to use in place of the standard error type provided by Go.
 
 A CallStackError consists of the following:
 
 - Component code - a name for the general area of the code that is generating
   the error. Component codes should consist of three uppercase letters. Numerics
-  and special characters are not allowed.
-
-.. note:: Make sure to use a consistent component name across code in related
-          files/packages.
-          Examples of component codes (with their full component name in parentheses)
-          are: CSP (bccsp), CMN (common), COR (core), CCS (core/chaincode), CDS
-          (core/deliverservice), SCC (core/scc), EVT (events), GSP (gossip), LGR
-          (ledger), PER (peer), ORD (orderer)
-
-We may, in the future, add constants to allow searching for currently defined
-components for those using an editor with code completion capabilities.
-
+  and special characters are not allowed. A set of component codes is defined
+  in common/errors/codes.go
 - Reason code - a short code to help identify the reason the error occurred.
   Reason codes should consist of three numeric values. Letters and special
-  characters are not allowed.
+  characters are not allowed. A set of reason codes is defined in
+  common/error/codes.go
 - Error code - the component code and reason code separated by a colon,
-  e.g. PER:404
+  e.g. MSP:404
 - Error message - the text that describes the error. This is the same as the
   input provided to ``fmt.Errorf()`` and ``Errors.New()``. If an error has been
   wrapped into the current error, its message will be appended.
@@ -39,9 +30,9 @@ The CallStackError interface exposes the following functions:
 
 - Error() - returns the error message with callstack appended
 - Message() - returns the error message (without callstack appended)
-- GetComponentCode()
-- GetReasonCode()
-- GetErrorCode()
+- GetComponentCode() - returns the 3-character component code
+- GetReasonCode() - returns the 3-digit reason code
+- GetErrorCode() - returns the error code, which is "component:reason"
 - GetStack() - returns just the callstack
 - WrapError(error) - wraps the provided error into the CallStackError
 
@@ -139,17 +130,21 @@ would display the error message:
 .. note:: The callstacks have not been displayed for this example for the sake of
           brevity.
 
-General guidelines for error handling in Fabric
------------------------------------------------
+General guidelines for error handling in Hyperledger Fabric
+-----------------------------------------------------------
 
 - If it is some sort of best effort thing you are doing, you should log the
   error and ignore it.
 - If you are servicing a user request, you should log the error and return it.
-- If the error comes from elsewhere in the Fabric, you have the choice to wrap
-  the error or not. Typically, it's best to not wrap the error and simply return
+- If the error comes from elsewhere, you have the choice to wrap the error
+  or not. Typically, it's best to not wrap the error and simply return
   it as is. However, for certain cases where a utility function is called,
   wrapping the error with a new component and reason code can help an end user
   understand where the error is really occurring without inspecting the callstack.
 - A panic should be handled within the same layer by throwing an internal error
   code/start a recovery process and should not be allowed to propagate to other
   packages.
+
+.. Licensed under Creative Commons Attribution 4.0 International License
+   https://creativecommons.org/licenses/by/4.0/
+

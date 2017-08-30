@@ -17,6 +17,8 @@ limitations under the License.
 package lockbasedtxmgr
 
 import (
+	"errors"
+
 	commonledger "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/statedb"
@@ -35,7 +37,9 @@ type queryHelper struct {
 }
 
 func (h *queryHelper) getState(ns string, key string) ([]byte, error) {
-	h.checkDone()
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
 	versionedValue, err := h.txmgr.db.GetState(ns, key)
 	if err != nil {
 		return nil, err
@@ -48,7 +52,9 @@ func (h *queryHelper) getState(ns string, key string) ([]byte, error) {
 }
 
 func (h *queryHelper) getStateMultipleKeys(namespace string, keys []string) ([][]byte, error) {
-	h.checkDone()
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
 	versionedValues, err := h.txmgr.db.GetStateMultipleKeys(namespace, keys)
 	if err != nil {
 		return nil, nil
@@ -65,7 +71,9 @@ func (h *queryHelper) getStateMultipleKeys(namespace string, keys []string) ([][
 }
 
 func (h *queryHelper) getStateRangeScanIterator(namespace string, startKey string, endKey string) (commonledger.ResultsIterator, error) {
-	h.checkDone()
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
 	itr, err := newResultsItr(namespace, startKey, endKey, h.txmgr.db, h.rwsetBuilder,
 		ledgerconfig.IsQueryReadsHashingEnabled(), ledgerconfig.GetMaxDegreeQueryReadsHashing())
 	if err != nil {
@@ -76,11 +84,58 @@ func (h *queryHelper) getStateRangeScanIterator(namespace string, startKey strin
 }
 
 func (h *queryHelper) executeQuery(namespace, query string) (commonledger.ResultsIterator, error) {
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
 	dbItr, err := h.txmgr.db.ExecuteQuery(namespace, query)
 	if err != nil {
 		return nil, err
 	}
 	return &queryResultsItr{DBItr: dbItr, RWSetBuilder: h.rwsetBuilder}, nil
+}
+
+func (h *queryHelper) getPrivateData(ns, coll, key string) ([]byte, error) {
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
+	versionedValue, err := h.txmgr.db.GetPrivateData(ns, coll, key)
+	if err != nil {
+		return nil, err
+	}
+	val, ver := decomposeVersionedValue(versionedValue)
+	if h.rwsetBuilder != nil {
+		h.rwsetBuilder.AddToHashedReadSet(ns, coll, key, ver)
+	}
+	return val, nil
+}
+
+func (h *queryHelper) getPrivateDataMultipleKeys(ns, coll string, keys []string) ([][]byte, error) {
+	if err := h.checkDone(); err != nil {
+		return nil, err
+	}
+	versionedValues, err := h.txmgr.db.GetPrivateDataMultipleKeys(ns, coll, keys)
+	if err != nil {
+		return nil, nil
+	}
+	values := make([][]byte, len(versionedValues))
+	for i, versionedValue := range versionedValues {
+		val, ver := decomposeVersionedValue(versionedValue)
+		if h.rwsetBuilder != nil {
+			h.rwsetBuilder.AddToHashedReadSet(ns, coll, keys[i], ver)
+		}
+		values[i] = val
+	}
+	return values, nil
+}
+
+func (h *queryHelper) getPrivateDataRangeScanIterator(namespace, collection, startKey, endKey string) (commonledger.ResultsIterator, error) {
+	// TODO
+	return nil, errors.New("Not Yet Supported")
+}
+
+func (h *queryHelper) executeQueryOnPrivateData(namespace, collection, query string) (commonledger.ResultsIterator, error) {
+	// TODO
+	return nil, errors.New("Not Yet Supported")
 }
 
 func (h *queryHelper) done() {
@@ -114,10 +169,11 @@ func (h *queryHelper) done() {
 	}
 }
 
-func (h *queryHelper) checkDone() {
+func (h *queryHelper) checkDone() error {
 	if h.doneInvoked {
-		panic("This instance should not be used after calling Done()")
+		return errors.New("This instance should not be used after calling Done()")
 	}
+	return nil
 }
 
 // resultsItr implements interface ledger.ResultsIterator
@@ -159,7 +215,7 @@ func newResultsItr(ns string, startKey string, endKey string,
 // Before returning the next result, update the EndKey and ItrExhausted in rangeQueryInfo
 // If we set the EndKey in the constructor (as we do for the StartKey) to what is
 // supplied in the original query, we may be capturing the unnecessary longer range if the
-// caller decides to stop iterating at some intermidiate point. Alternatively, we could have
+// caller decides to stop iterating at some intermediate point. Alternatively, we could have
 // set the EndKey and ItrExhausted in the Close() function but it may not be desirable to change
 // transactional behaviour based on whether the Close() was invoked or not
 func (itr *resultsItr) Next() (commonledger.QueryResult, error) {
