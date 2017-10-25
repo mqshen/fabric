@@ -22,19 +22,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/common/tools/configtxgen/provisional"
+	"github.com/hyperledger/fabric/common/flogging"
+	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/ledger"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
 
-	logging "github.com/op/go-logging"
 	"github.com/stretchr/testify/assert"
 )
 
 var genesisBlock = cb.NewBlock(0, nil)
 
 func init() {
-	logging.SetLevel(logging.DEBUG, "")
+	flogging.SetModuleLevel(pkgLogID, "DEBUG")
 }
 
 type testEnv struct {
@@ -48,7 +48,7 @@ func initialize(t *testing.T) (*testEnv, *jsonLedger) {
 		t.Fatalf("Error creating temp dir: %s", err)
 	}
 	flf := New(name).(*jsonLedgerFactory)
-	fl, err := flf.GetOrCreate(provisional.TestChainID)
+	fl, err := flf.GetOrCreate(genesisconfig.TestChainID)
 	if err != nil {
 		panic(err)
 	}

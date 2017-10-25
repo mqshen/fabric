@@ -36,11 +36,6 @@ const (
 	acceptChanSize       = 100
 )
 
-var (
-	identityExpirationCheckInterval = time.Hour * 24
-	identityInactivityCheckInterval = time.Minute * 10
-)
-
 type channelRoutingFilterFactory func(channel.GossipChannel) filter.RoutingFilter
 
 type gossipServiceImpl struct {
@@ -66,37 +61,24 @@ type gossipServiceImpl struct {
 	disSecAdap        *discoverySecurityAdapter
 	mcs               api.MessageCryptoService
 	stateInfoMsgStore msgstore.MessageStore
+	certPuller        pull.Mediator
 }
 
 // NewGossipService creates a gossip instance attached to a gRPC server
 func NewGossipService(conf *Config, s *grpc.Server, secAdvisor api.SecurityAdvisor,
-	mcs api.MessageCryptoService, idMapper identity.Mapper, selfIdentity api.PeerIdentityType,
+	mcs api.MessageCryptoService, selfIdentity api.PeerIdentityType,
 	secureDialOpts api.PeerSecureDialOpts) Gossip {
-
-	var c comm.Comm
 	var err error
 
 	lgr := util.GetLogger(util.LoggingGossipModule, conf.ID)
-	if s == nil {
-		c, err = createCommWithServer(conf.BindPort, idMapper, selfIdentity, secureDialOpts)
-	} else {
-		c, err = createCommWithoutServer(s, conf.TLSServerCert, idMapper, selfIdentity, secureDialOpts)
-	}
-
-	if err != nil {
-		lgr.Errorf("Failed instntiating communication layer: %+v", errors.WithStack(err))
-		return nil
-	}
 
 	g := &gossipServiceImpl{
 		selfOrg:               secAdvisor.OrgByPeerIdentity(selfIdentity),
 		secAdvisor:            secAdvisor,
 		selfIdentity:          selfIdentity,
 		presumedDead:          make(chan common.PKIidType, presumedDeadChanSize),
-		idMapper:              idMapper,
 		disc:                  nil,
 		mcs:                   mcs,
-		comm:                  c,
 		conf:                  conf,
 		ChannelDeMultiplexer:  comm.NewChannelDemultiplexer(),
 		logger:                lgr,
@@ -106,6 +88,22 @@ func NewGossipService(conf *Config, s *grpc.Server, secAdvisor api.SecurityAdvis
 		includeIdentityPeriod: time.Now().Add(conf.PublishCertPeriod),
 	}
 	g.stateInfoMsgStore = g.newStateInfoMsgStore()
+
+	g.idMapper = identity.NewIdentityMapper(mcs, selfIdentity, func(pkiID common.PKIidType, identity api.PeerIdentityType) {
+		g.comm.CloseConn(&comm.RemotePeer{PKIID: pkiID})
+		g.certPuller.Remove(string(pkiID))
+	})
+
+	if s == nil {
+		g.comm, err = createCommWithServer(conf.BindPort, g.idMapper, selfIdentity, secureDialOpts)
+	} else {
+		g.comm, err = createCommWithoutServer(s, conf.TLSServerCert, g.idMapper, selfIdentity, secureDialOpts)
+	}
+
+	if err != nil {
+		lgr.Error("Failed instntiating communication layer:", err)
+		return nil
+	}
 
 	g.chanState = newChannelState(g)
 	g.emitter = newBatchingEmitter(conf.PropagateIterations,
@@ -117,14 +115,14 @@ func NewGossipService(conf *Config, s *grpc.Server, secAdvisor api.SecurityAdvis
 	g.disc = discovery.NewDiscoveryService(g.selfNetworkMember(), g.discAdapter, g.disSecAdap, g.disclosurePolicy)
 	g.logger.Info("Creating gossip service with self membership of", g.selfNetworkMember())
 
-	g.certStore = newCertStore(g.createCertStorePuller(), idMapper, selfIdentity, mcs)
+	g.certPuller = g.createCertStorePuller()
+	g.certStore = newCertStore(g.certPuller, g.idMapper, selfIdentity, mcs)
 
 	if g.conf.ExternalEndpoint == "" {
 		g.logger.Warning("External endpoint is empty, peer will not be accessible outside of its organization")
 	}
 
 	go g.start()
-	go g.periodicalIdentityValidationAndExpiration()
 	go g.connect2BootstrapPeers()
 
 	return g
@@ -168,8 +166,8 @@ func createCommWithoutServer(s *grpc.Server, cert *tls.Certificate, idStore iden
 
 // NewGossipServiceWithServer creates a new gossip instance with a gRPC server
 func NewGossipServiceWithServer(conf *Config, secAdvisor api.SecurityAdvisor, mcs api.MessageCryptoService,
-	mapper identity.Mapper, identity api.PeerIdentityType, secureDialOpts api.PeerSecureDialOpts) Gossip {
-	return NewGossipService(conf, nil, secAdvisor, mcs, mapper, identity, secureDialOpts)
+	identity api.PeerIdentityType, secureDialOpts api.PeerSecureDialOpts) Gossip {
+	return NewGossipService(conf, nil, secAdvisor, mcs, identity, secureDialOpts)
 }
 
 func createCommWithServer(port int, idStore identity.Mapper, identity api.PeerIdentityType,
@@ -190,27 +188,26 @@ func (g *gossipServiceImpl) JoinChan(joinMsg api.JoinChannelMessage, chainID com
 	}
 }
 
+func (g *gossipServiceImpl) LeaveChan(chainID common.ChainID) {
+	gc := g.chanState.getGossipChannelByChainID(chainID)
+	if gc == nil {
+		g.logger.Debug("No such channel", chainID)
+		return
+	}
+	b, _ := (&common.NodeMetastate{}).Bytes()
+	stateInfMsg, err := g.createStateInfoMsg(b, chainID, true)
+	if err != nil {
+		g.logger.Errorf("Failed creating StateInfo message: %+v", errors.WithStack(err))
+		return
+	}
+	gc.UpdateStateInfo(stateInfMsg)
+	gc.LeaveChannel()
+}
+
 // SuspectPeers makes the gossip instance validate identities of suspected peers, and close
 // any connections to peers with identities that are found invalid
 func (g *gossipServiceImpl) SuspectPeers(isSuspected api.PeerSuspector) {
-	for _, pkiID := range g.certStore.listRevokedPeers(isSuspected) {
-		g.comm.CloseConn(&comm.RemotePeer{PKIID: pkiID})
-	}
-}
-
-func (g *gossipServiceImpl) periodicalIdentityValidationAndExpiration() {
-	// We check once every identityExpirationCheckInterval for identities that have been expired
-	go g.periodicalIdentityValidation(func(identity api.PeerIdentityType) bool {
-		// We need to validate every identity to check if it has been expired
-		return true
-	}, identityExpirationCheckInterval)
-
-	// We check once every identityInactivityCheckInterval for identities that have not been used for a long time
-	go g.periodicalIdentityValidation(func(identity api.PeerIdentityType) bool {
-		// We don't validate any identity, because we just want to know whether
-		// it has not been used for a long time
-		return false
-	}, identityInactivityCheckInterval)
+	g.certStore.suspectPeers(isSuspected)
 }
 
 func (g *gossipServiceImpl) periodicalIdentityValidation(suspectFunc api.PeerSuspector, interval time.Duration) {
@@ -311,8 +308,9 @@ func (g *gossipServiceImpl) start() {
 
 		isConn := gMsg.GetGossipMessage().GetConn() != nil
 		isEmpty := gMsg.GetGossipMessage().GetEmpty() != nil
+		isPrivateData := gMsg.GetGossipMessage().IsPrivateDataMsg()
 
-		return !(isConn || isEmpty)
+		return !(isConn || isEmpty || isPrivateData)
 	}
 
 	incMsgs := g.comm.Accept(msgSelector)
@@ -430,7 +428,7 @@ func (g *gossipServiceImpl) validateMsg(msg proto.ReceivedMessage) bool {
 
 	if msg.GetGossipMessage().IsStateInfoMsg() {
 		if err := g.validateStateInfoMsg(msg.GetGossipMessage()); err != nil {
-			g.logger.Warningf("StateInfo message %v is found invalid: %+v", msg, err)
+			g.logger.Warningf("StateInfo message %v is found invalid: %v", msg, err)
 			return false
 		}
 	}
@@ -592,6 +590,49 @@ func (g *gossipServiceImpl) gossipInChan(messages []*proto.SignedGossipMessage, 
 	}
 }
 
+// SendByCriteria sends a given message to all peers that match the given SendCriteria
+func (g *gossipServiceImpl) SendByCriteria(msg *proto.SignedGossipMessage, criteria SendCriteria) error {
+	if criteria.Timeout == 0 {
+		return errors.New("Timeout should be specified")
+	}
+
+	if criteria.IsEligible == nil {
+		criteria.IsEligible = filter.SelectAllPolicy
+	}
+
+	membership := g.disc.GetMembership()
+	if criteria.MaxPeers == 0 {
+		criteria.MaxPeers = len(membership)
+	}
+
+	if len(criteria.Channel) > 0 {
+		gc := g.chanState.getGossipChannelByChainID(criteria.Channel)
+		if gc == nil {
+			return fmt.Errorf("Requested to Send for channel %s, but no such channel exists", string(criteria.Channel))
+		}
+		membership = gc.GetPeers()
+	}
+
+	peers2send := filter.SelectPeers(criteria.MaxPeers, membership, criteria.IsEligible)
+	if len(peers2send) < criteria.MinAck {
+		return fmt.Errorf("Requested to send to at least %d peers, but know only of %d suitable peers", criteria.MinAck, len(peers2send))
+	}
+
+	results := g.comm.SendWithAck(msg, criteria.Timeout, criteria.MinAck, peers2send...)
+
+	for _, res := range results {
+		if res.Error() == "" {
+			continue
+		}
+		g.logger.Warning("Failed sending to", res.Endpoint, "error:", res.Error())
+	}
+
+	if results.AckCount() < criteria.MinAck {
+		return errors.New(results.String())
+	}
+	return nil
+}
+
 // Gossip sends a message to other peers to the network
 func (g *gossipServiceImpl) Gossip(msg *proto.GossipMessage) {
 	// Educate developers to Gossip messages with the right tags.
@@ -709,7 +750,7 @@ func (g *gossipServiceImpl) UpdateChannelMetadata(md []byte, chainID common.Chai
 		g.logger.Debug("No such channel", chainID)
 		return
 	}
-	stateInfMsg, err := g.createStateInfoMsg(md, chainID)
+	stateInfMsg, err := g.createStateInfoMsg(md, chainID, false)
 	if err != nil {
 		g.logger.Errorf("Failed creating StateInfo message: %+v", errors.WithStack(err))
 		return
@@ -1064,7 +1105,11 @@ func (g *gossipServiceImpl) connect2BootstrapPeers() {
 
 }
 
-func (g *gossipServiceImpl) createStateInfoMsg(metadata []byte, chainID common.ChainID) (*proto.SignedGossipMessage, error) {
+func (g *gossipServiceImpl) createStateInfoMsg(metadata []byte, chainID common.ChainID, leftChannel bool) (*proto.SignedGossipMessage, error) {
+	metaState, err := common.FromBytes(metadata)
+	if err != nil {
+		return nil, err
+	}
 	pkiID := g.comm.GetPKIid()
 	stateInfMsg := &proto.StateInfo{
 		Channel_MAC: channel.GenerateMAC(pkiID, chainID),
@@ -1074,6 +1119,12 @@ func (g *gossipServiceImpl) createStateInfoMsg(metadata []byte, chainID common.C
 			IncNum: uint64(g.incTime.UnixNano()),
 			SeqNum: uint64(time.Now().UnixNano()),
 		},
+		Properties: &proto.Properties{
+			LedgerHeight: metaState.LedgerHeight,
+		},
+	}
+	if leftChannel {
+		stateInfMsg.Properties.LeftChannel = true
 	}
 	m := &proto.GossipMessage{
 		Nonce: 0,
@@ -1088,7 +1139,7 @@ func (g *gossipServiceImpl) createStateInfoMsg(metadata []byte, chainID common.C
 	signer := func(msg []byte) ([]byte, error) {
 		return g.mcs.Sign(msg)
 	}
-	_, err := sMsg.Sign(signer)
+	_, err = sMsg.Sign(signer)
 	return sMsg, errors.WithStack(err)
 }
 

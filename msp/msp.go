@@ -12,10 +12,6 @@ import (
 	"github.com/hyperledger/fabric/protos/msp"
 )
 
-// FIXME: we need better comments on the interfaces!!
-// FIXME: we need better comments on the interfaces!!
-// FIXME: we need better comments on the interfaces!!
-
 // IdentityDeserializer is implemented by both MSPManger and MSP
 type IdentityDeserializer interface {
 	// DeserializeIdentity deserializes an identity.
@@ -23,6 +19,9 @@ type IdentityDeserializer interface {
 	// an msp that is different from this one that is performing
 	// the deserialization.
 	DeserializeIdentity(serializedIdentity []byte) (Identity, error)
+
+	// IsWellFormed checks if the given identity can be deserialized into its provider-specific form
+	IsWellFormed(identity *msp.SerializedIdentity) error
 }
 
 // Membership service provider APIs for Hyperledger Fabric:
@@ -194,5 +193,6 @@ type ProviderType int
 // The ProviderType of a member relative to the member API
 const (
 	FABRIC ProviderType = iota // MSP is of FABRIC type
+	IDEMIX                     // MSP is of IDEMIX type
 	OTHER                      // MSP is of OTHER TYPE
 )

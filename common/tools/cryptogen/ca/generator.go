@@ -170,23 +170,27 @@ func subjectTemplateAdditional(country, province, locality, orgUnit, streetAddre
 // default template for X509 certificates
 func x509Template() x509.Certificate {
 
-	//generate a serial number
+	// generate a serial number
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
 
-	now := time.Now()
+	// set expiry to around 10 years
+	expiry := 3650 * 24 * time.Hour
+	// backdate 5 min
+	notBefore := time.Now().Add(-5 * time.Minute).UTC()
+
 	//basic template to use
 	x509 := x509.Certificate{
 		SerialNumber:          serialNumber,
-		NotBefore:             now,
-		NotAfter:              now.Add(3650 * 24 * time.Hour), //~ten years
+		NotBefore:             notBefore,
+		NotAfter:              notBefore.Add(expiry).UTC(),
 		BasicConstraintsValid: true,
 	}
 	return x509
 
 }
 
-// generate a signed X509 certficate using ECDSA
+// generate a signed X509 certificate using ECDSA
 func genCertificateECDSA(baseDir, name string, template, parent *x509.Certificate, pub *ecdsa.PublicKey,
 	priv interface{}) (*x509.Certificate, error) {
 

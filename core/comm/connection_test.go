@@ -73,6 +73,23 @@ func TestConnection_Correct(t *testing.T) {
 	tmpConn.Close()
 }
 
+func TestChaincodeConnection_Correct(t *testing.T) {
+	testutil.SetupTestConfig()
+	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
+	peerAddress := GetPeerTestingAddress("7052")
+	var tmpConn *grpc.ClientConn
+	var err error
+	if TLSEnabled() {
+		tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
+	}
+	tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, false, nil)
+	if err != nil {
+		t.Fatalf("error connection to server at host:port = %s\n", peerAddress)
+	}
+
+	tmpConn.Close()
+}
+
 func TestConnection_WrongAddress(t *testing.T) {
 	testutil.SetupTestConfig()
 	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
@@ -84,6 +101,24 @@ func TestConnection_WrongAddress(t *testing.T) {
 		tmpConn, err = NewClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
 	}
 	tmpConn, err = NewClientConnectionWithAddress(peerAddress, true, false, nil)
+	if err == nil {
+		fmt.Printf("error connection to server -  at host:port = %s\n", peerAddress)
+		t.Error("error connection to server - connection should fail")
+		tmpConn.Close()
+	}
+}
+
+func TestChaincodeConnection_WrongAddress(t *testing.T) {
+	testutil.SetupTestConfig()
+	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
+	//some random port
+	peerAddress := GetPeerTestingAddress("10287")
+	var tmpConn *grpc.ClientConn
+	var err error
+	if TLSEnabled() {
+		tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
+	}
+	tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, false, nil)
 	if err == nil {
 		fmt.Printf("error connection to server -  at host:port = %s\n", peerAddress)
 		t.Error("error connection to server - connection should fail")
@@ -253,7 +288,9 @@ func testInvoke(t *testing.T, channelID string, s *srv, shouldSucceed bool) {
 	creds, err := GetCASupport().GetDeliverServiceCredentials(channelID)
 	assert.NoError(t, err)
 	endpoint := fmt.Sprintf("localhost:%d", s.port)
-	conn, err := grpc.Dial(endpoint, grpc.WithTimeout(time.Second*3), grpc.WithTransportCredentials(creds), grpc.WithBlock())
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, time.Second*3)
+	conn, err := grpc.DialContext(ctx, endpoint, grpc.WithTransportCredentials(creds), grpc.WithBlock())
 	if shouldSucceed {
 		assert.NoError(t, err)
 		defer conn.Close()

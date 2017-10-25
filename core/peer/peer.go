@@ -9,6 +9,7 @@ package peer
 import (
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 
 	"github.com/hyperledger/fabric/common/channelconfig"
@@ -22,6 +23,7 @@ import (
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/committer"
 	"github.com/hyperledger/fabric/core/committer/txvalidator"
+	"github.com/hyperledger/fabric/core/common/privdata"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/transientstore"
@@ -34,6 +36,7 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 )
 
@@ -91,9 +94,27 @@ func (cs *chainSupport) Apply(configtx *common.ConfigEnvelope) error {
 		if err != nil {
 			return err
 		}
+
+		capabilitiesSupportedOrPanic(bundle)
+
 		cs.bundleSource.Update(bundle)
 	}
 	return nil
+}
+
+func capabilitiesSupportedOrPanic(res channelconfig.Resources) {
+	ac, ok := res.ApplicationConfig()
+	if !ok {
+		peerLogger.Panicf("[channel %s] does not have application config so is incompatible", res.ConfigtxManager().ChainID())
+	}
+
+	if err := ac.Capabilities().Supported(); err != nil {
+		peerLogger.Panicf("[channel %s] incompatible %s", res.ConfigtxManager(), err)
+	}
+
+	if err := res.ChannelConfig().Capabilities().Supported(); err != nil {
+		peerLogger.Panicf("[channel %s] incompatible %s", res.ConfigtxManager(), err)
+	}
 }
 
 func (cs *chainSupport) Ledger() ledger.PeerLedger {
@@ -133,10 +154,20 @@ func MockSetMSPIDGetter(mspIDGetter func(string) []string) {
 	mockMSPIDGetter = mspIDGetter
 }
 
+// validationWorkersSemaphore is the semaphore used to ensure that
+// there are not too many concurrent tx validation goroutines
+var validationWorkersSemaphore *semaphore.Weighted
+
 // Initialize sets up any chains that the peer has from the persistence. This
 // function should be called at the start up when the ledger and gossip
 // ready
 func Initialize(init func(string)) {
+	nWorkers := viper.GetInt("peer.validatorPoolSize")
+	if nWorkers <= 0 {
+		nWorkers = runtime.NumCPU()
+	}
+	validationWorkersSemaphore = semaphore.NewWeighted(int64(nWorkers))
+
 	chainInitializer = init
 
 	var cb *common.Block
@@ -169,7 +200,7 @@ func Initialize(init func(string)) {
 	}
 }
 
-// Take care to initialize chain after peer joined, for example deploys system CCs
+// InitChain takes care to initialize chain after peer joined, for example deploys system CCs
 func InitChain(cid string) {
 	if chainInitializer != nil {
 		// Initialize chaincode, namely deploy system CC
@@ -219,6 +250,8 @@ func createChain(cid string, ledger ledger.PeerLedger, cb *common.Block) error {
 	if err != nil {
 		return err
 	}
+
+	capabilitiesSupportedOrPanic(bundle)
 
 	channelconfig.LogSanityChecks(bundle)
 
@@ -279,7 +312,12 @@ func createChain(cid string, ledger ledger.PeerLedger, cb *common.Block) error {
 	cs.Resources = bundleSource
 	cs.bundleSource = bundleSource
 
-	c := committer.NewLedgerCommitterReactive(ledger, txvalidator.NewTxValidator(cs), func(block *common.Block) error {
+	vcs := struct {
+		*chainSupport
+		*semaphore.Weighted
+	}{cs, validationWorkersSemaphore}
+	validator := txvalidator.NewTxValidator(vcs)
+	c := committer.NewLedgerCommitterReactive(ledger, func(block *common.Block) error {
 		chainID, err := utils.GetChainIDFromBlock(block)
 		if err != nil {
 			return err
@@ -297,7 +335,12 @@ func createChain(cid string, ledger ledger.PeerLedger, cb *common.Block) error {
 	if err != nil {
 		return errors.Wrapf(err, "Failed opening transient store for %s", bundle.ConfigtxManager().ChainID())
 	}
-	service.GetGossipService().InitializeChannel(bundle.ConfigtxManager().ChainID(), c, store, ordererAddresses)
+	service.GetGossipService().InitializeChannel(bundle.ConfigtxManager().ChainID(), ordererAddresses, service.Support{
+		Validator: validator,
+		Committer: c,
+		Store:     store,
+		Cs:        &privdata.NopCollectionStore{},
+	})
 
 	chains.Lock()
 	defer chains.Unlock()

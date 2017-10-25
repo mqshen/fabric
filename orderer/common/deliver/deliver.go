@@ -19,6 +19,7 @@ package deliver
 import (
 	"io"
 
+	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/orderer/common/ledger"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
@@ -31,7 +32,13 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 )
 
-var logger = logging.MustGetLogger("orderer/common/deliver")
+const pkgLogID = "orderer/common/deliver"
+
+var logger *logging.Logger
+
+func init() {
+	logger = flogging.MustGetLogger(pkgLogID)
+}
 
 // Handler defines an interface which handles Deliver requests
 type Handler interface {
@@ -131,7 +138,7 @@ func (ds *deliverServer) deliverBlocks(srv ab.AtomicBroadcast_DeliverServer, env
 
 	lastConfigSequence := chain.Sequence()
 
-	sf := msgprocessor.NewSigFilter(policies.ChannelReaders, chain.PolicyManager())
+	sf := msgprocessor.NewSigFilter(policies.ChannelReaders, chain)
 	if err := sf.Apply(envelope); err != nil {
 		logger.Warningf("[channel: %s] Received unauthorized deliver request from %s: %s", chdr.ChannelId, addr, err)
 		return sendStatusReply(srv, cb.Status_FORBIDDEN)

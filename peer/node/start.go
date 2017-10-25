@@ -20,6 +20,7 @@ import (
 
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/localmsp"
+	"github.com/hyperledger/fabric/common/viperutil"
 	"github.com/hyperledger/fabric/core"
 	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/chaincode"
@@ -41,7 +42,9 @@ import (
 	peergossip "github.com/hyperledger/fabric/peer/gossip"
 	"github.com/hyperledger/fabric/peer/version"
 	cb "github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protos/ledger/rwset"
 	pb "github.com/hyperledger/fabric/protos/peer"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
@@ -169,18 +172,17 @@ func serve(args []string) error {
 	// Register the Admin server
 	pb.RegisterAdminServer(peerServer.Server(), core.NewAdminServer())
 
-	privDataDist := func(channel string, txID string, privateData []byte) error {
-		return service.GetGossipService().DistributePrivateData(channel, txID, privateData, nil, nil)
+	privDataDist := func(channel string, txID string, privateData *rwset.TxPvtReadWriteSet) error {
+		return service.GetGossipService().DistributePrivateData(channel, txID, privateData)
 	}
 
 	serverEndorser := endorser.NewEndorserServer(privDataDist)
-	libConf := library.Config{
-		AuthFilterFactory: viper.GetString("peer.handlers.authFilter"),
-		DecoratorFactory:  viper.GetString("peer.handlers.decorator"),
+	libConf := library.Config{}
+	if err = viperutil.EnhancedExactUnmarshalKey("peer.handlers", &libConf); err != nil {
+		return errors.WithMessage(err, "could not load YAML config")
 	}
-	auth := library.InitRegistry(libConf).Lookup(library.AuthKey).(authHandler.Filter)
-	auth.Init(serverEndorser)
-
+	authFilters := library.InitRegistry(libConf).Lookup(library.Auth).([]authHandler.Filter)
+	auth := authHandler.ChainFilters(serverEndorser, authFilters...)
 	// Register the Endorser server
 	pb.RegisterEndorserServer(peerServer.Server(), auth)
 
@@ -281,7 +283,7 @@ func serve(args []string) error {
 
 	// set the logging level for specific modules defined via environment
 	// variables or core.yaml
-	overrideLogModules := []string{"msp", "gossip", "ledger", "cauthdsl", "policies", "grpc"}
+	overrideLogModules := []string{"msp", "gossip", "ledger", "cauthdsl", "policies", "grpc", "peer.gossip"}
 	for _, module := range overrideLogModules {
 		err = common.SetLogLevelFromViper(module)
 		if err != nil {
@@ -317,7 +319,7 @@ func createChaincodeServer(caCert []byte, peerHostname string) (comm.GRPCServer,
 		config.ClientRootCAs = append(config.ClientRootCAs, caCert)
 	}
 
-	srv, err = comm.NewGRPCServer(cclistenAddress, config)
+	srv, err = comm.NewChaincodeGRPCServer(cclistenAddress, config)
 	if err != nil {
 		panic(err)
 	}
@@ -383,11 +385,11 @@ func createEventHubServer(secureConfig comm.SecureServerConfig) (comm.GRPCServer
 		logger.Errorf("Failed to return new GRPC server: %s", err)
 		return nil, err
 	}
-	ehServer := producer.NewEventsServer(
-		uint(viper.GetInt("peer.events.buffersize")),
-		viper.GetDuration("peer.events.timeout"))
 
+	ehConfig := &producer.EventsServerConfig{BufferSize: uint(viper.GetInt("peer.events.buffersize")), Timeout: viper.GetDuration("peer.events.timeout"), TimeWindow: viper.GetDuration("peer.events.timewindow")}
+	ehServer := producer.NewEventsServer(ehConfig)
 	pb.RegisterEventsServer(grpcServer.Server(), ehServer)
+
 	return grpcServer, nil
 }
 
