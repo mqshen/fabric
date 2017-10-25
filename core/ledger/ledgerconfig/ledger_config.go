@@ -54,11 +54,6 @@ func GetHistoryLevelDBPath() string {
 	return filepath.Join(GetRootPath(), "historyLeveldb")
 }
 
-// GetTransientStorePath returns the filesystem path that is used to temporarily store the private rwset
-func GetTransientStorePath() string {
-	return filepath.Join(GetRootPath(), "transientStore")
-}
-
 // GetPvtWritesetStorePath returns the filesystem path that is used for permanent storage of privare write-sets
 func GetPvtWritesetStorePath() string {
 	return filepath.Join(GetRootPath(), "pvtWritesetStore")
@@ -87,6 +82,16 @@ func GetQueryLimit() int {
 		queryLimit = 10000
 	}
 	return queryLimit
+}
+
+//GetMaxBatchUpdateSize exposes the maxBatchUpdateSize variable
+func GetMaxBatchUpdateSize() int {
+	maxBatchUpdateSize := viper.GetInt("ledger.state.couchDBConfig.maxBatchUpdateSize")
+	// if maxBatchUpdateSize was unset, default to 500
+	if !viper.IsSet("ledger.state.couchDBConfig.maxBatchUpdateSize") {
+		maxBatchUpdateSize = 500
+	}
+	return maxBatchUpdateSize
 }
 
 //IsHistoryDBEnabled exposes the historyDatabase variable

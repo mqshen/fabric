@@ -19,23 +19,22 @@ package ramledger
 import (
 	"testing"
 
-	"github.com/hyperledger/fabric/common/tools/configtxgen/provisional"
+	"github.com/hyperledger/fabric/common/flogging"
+	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/ledger"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
-
-	logging "github.com/op/go-logging"
 )
 
 var genesisBlock = cb.NewBlock(0, nil)
 
 func init() {
-	logging.SetLevel(logging.DEBUG, "")
+	flogging.SetModuleLevel(pkgLogID, "DEBUG")
 }
 
 func newTestChain(maxSize int) *ramLedger {
 	rlf := New(maxSize)
-	chain, err := rlf.GetOrCreate(provisional.TestChainID)
+	chain, err := rlf.GetOrCreate(genesisconfig.TestChainID)
 	if err != nil {
 		panic(err)
 	}

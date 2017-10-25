@@ -18,16 +18,11 @@ import (
 	ab "github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protos/utils"
 
-	logging "github.com/op/go-logging"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
 )
-
-func init() {
-	logging.SetLevel(logging.DEBUG, "")
-}
 
 func TestBroadcastNoPanic(t *testing.T) {
 	// Defer recovers from the panic

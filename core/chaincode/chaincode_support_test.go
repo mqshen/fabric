@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2017 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package chaincode
@@ -20,6 +10,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -34,10 +25,13 @@ import (
 	mocklgr "github.com/hyperledger/fabric/common/mocks/ledger"
 	mockpeer "github.com/hyperledger/fabric/common/mocks/peer"
 	"github.com/hyperledger/fabric/common/util"
+	"github.com/hyperledger/fabric/core/aclmgmt"
+	"github.com/hyperledger/fabric/core/aclmgmt/mocks"
 	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/config"
+	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/peer"
@@ -139,8 +133,15 @@ func (meqe *mockExecQuerySimulator) GetTxSimulationResults() ([]byte, error) {
 	return simRes.GetPubSimulationBytes()
 }
 
+var mockAclProvider *mocks.MockACLProvider
+
 //initialize peer and start up. If security==enabled, login as vp
 func initMockPeer(chainIDs ...string) error {
+	mockAclProvider = &mocks.MockACLProvider{}
+	mockAclProvider.Reset()
+
+	aclmgmt.RegisterACLProvider(mockAclProvider)
+
 	peer.MockInitialize()
 
 	mspGetter := func(cid string) []string {
@@ -198,6 +199,26 @@ var mockPeerCCSupport = mockpeer.NewMockPeerSupport()
 
 func mockChaincodeStreamGetter(name string) (shim.PeerChaincodeStream, error) {
 	return mockPeerCCSupport.GetCC(name)
+}
+
+type mockCCLauncher struct {
+	execTime *time.Duration
+	resp     container.VMCResp
+	retErr   error
+	notfyb   bool
+}
+
+func (ccl *mockCCLauncher) launch(ctxt context.Context, notfy chan bool) (interface{}, error) {
+	if ccl.execTime != nil {
+		time.Sleep(*ccl.execTime)
+	}
+
+	//no error on launch, notify
+	if ccl.resp.Err == nil {
+		notfy <- ccl.notfyb
+	}
+
+	return ccl.resp, ccl.retErr
 }
 
 func setupcc(name string) (*mockpeer.MockCCComm, *mockpeer.MockCCComm) {
@@ -354,6 +375,12 @@ func initializeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCC
 	txid := util.GenerateUUID()
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
 
+	//setup CheckACL calls
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
+
 	//bad txid in response (should be "1"), should fail
 	resp := &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("init succeeded")}), Txid: "unknowntxid"}}
 	respSet := &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{resp}}
@@ -379,8 +406,10 @@ func initializeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCC
 	//    correct block number for ending sim
 
 	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutStateInfo{Key: "A", Value: []byte("100")}), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutStateInfo{Key: "B", Value: []byte("200")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "", Key: "A", Value: []byte("100")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "", Key: "B", Value: []byte("200")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "c1", Key: "C", Value: []byte("300")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "c2", Key: "C", Value: []byte("300")}), Txid: txid}},
 		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), ChaincodeEvent: &pb.ChaincodeEvent{ChaincodeId: ccname}, Txid: txid}}}}
 
 	cccid.Version = "1"
@@ -404,12 +433,18 @@ func invokeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm)
 	txid := util.GenerateUUID()
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
 
+	//setup CheckACL calls
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
+
 	respSet := &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: []byte("A"), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: []byte("B"), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutStateInfo{Key: "A", Value: []byte("90")}), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutStateInfo{Key: "B", Value: []byte("210")}), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutStateInfo{Key: "TODEL", Value: []byte("-to-be-deleted-")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "", Key: "A"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "", Key: "B"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "", Key: "A", Value: []byte("90")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "", Key: "B", Value: []byte("210")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "", Key: "TODEL", Value: []byte("-to-be-deleted-")}), Txid: txid}},
 		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}}}}
 
 	cccid := ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
@@ -417,8 +452,8 @@ func invokeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm)
 
 	//delete the extra var
 	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: []byte("TODEL"), Txid: "3"}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_DEL_STATE, Payload: []byte("TODEL"), Txid: "3"}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "", Key: "TODEL"}), Txid: "3"}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_DEL_STATE, Payload: putils.MarshalOrPanic(&pb.DelState{Collection: "", Key: "TODEL"}), Txid: "3"}},
 		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: "3"}}}}
 
 	cccid.TxID = "3"
@@ -427,7 +462,7 @@ func invokeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm)
 	//get the extra var and delete it
 	//NOTE- we are calling ExecuteWithErrorFilter which returns error if chaincode returns ERROR response
 	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: []byte("TODEL"), Txid: "4"}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "", Key: "TODEL"}), Txid: "4"}},
 		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.ERROR, Message: "variable not found"}), Txid: "4"}}}}
 
 	cccid.TxID = "4"
@@ -438,7 +473,55 @@ func invokeCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm)
 	return nil
 }
 
-func getQueryStateByRange(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm) error {
+func invokePrivateDataGetPutDelCC(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm) error {
+	done := setuperror()
+
+	errorFunc := func(ind int, err error) {
+		done <- err
+	}
+
+	chaincodeID := &pb.ChaincodeID{Name: ccname, Version: "0"}
+	ci := &pb.ChaincodeInput{[][]byte{[]byte("invokePrivateData")}, nil}
+	cis := &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
+	txid := util.GenerateUUID()
+	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
+
+	respSet := &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "", Key: "C"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.ERROR, Message: "variable not found"}), Txid: txid}}}}
+
+	cccid := ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
+	execCC(t, ctxt, ccSide, cccid, false, true, done, cis, respSet)
+
+	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "c1", Key: "C"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "c1", Key: "C", Value: []byte("310")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "c1", Key: "A", Value: []byte("100")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_PUT_STATE, Payload: putils.MarshalOrPanic(&pb.PutState{Collection: "c1", Key: "B", Value: []byte("100")}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_DEL_STATE, Payload: putils.MarshalOrPanic(&pb.DelState{Collection: "c2", Key: "C"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}}}}
+
+	cccid = ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
+	execCC(t, ctxt, ccSide, cccid, false, false, done, cis, respSet)
+
+	endTx(t, cccid, txsim, cis)
+
+	txid = util.GenerateUUID()
+	ctxt, txsim, sprop, prop = startTx(t, chainID, cis, txid)
+
+	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE, Payload: putils.MarshalOrPanic(&pb.GetState{Collection: "c2", Key: "C"}), Txid: txid}},
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.ERROR, Message: "variable not found"}), Txid: txid}}}}
+
+	cccid = ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
+	execCC(t, ctxt, ccSide, cccid, false, true, done, cis, respSet)
+
+	endTx(t, cccid, txsim, cis)
+
+	return nil
+}
+
+func getQueryStateByRange(t *testing.T, collection, chainID, ccname string, ccSide *mockpeer.MockCCComm) error {
 	done := setuperror()
 
 	errorFunc := func(ind int, err error) {
@@ -450,6 +533,12 @@ func getQueryStateByRange(t *testing.T, chainID, ccname string, ccSide *mockpeer
 	cis := &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
 	txid := util.GenerateUUID()
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
+
+	//setup CheckACL calls
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
 
 	//create the response
 	queryStateNextFunc := func(reqMsg *pb.ChaincodeMessage) *pb.ChaincodeMessage {
@@ -463,14 +552,27 @@ func getQueryStateByRange(t *testing.T, chainID, ccname string, ccSide *mockpeer
 		return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_QUERY_STATE_CLOSE, Payload: putils.MarshalOrPanic(&pb.QueryStateClose{Id: qr.Id}), Txid: txid}
 	}
 
-	respSet := &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE_BY_RANGE, Payload: putils.MarshalOrPanic(&pb.GetStateByRange{StartKey: "A", EndKey: "B"}), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, queryStateNextFunc},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, queryStateCloseFunc},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}}}}
+	var mkpeer []*mockpeer.MockResponse
+
+	mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_STATE_BY_RANGE, Payload: putils.MarshalOrPanic(&pb.GetStateByRange{Collection: collection, StartKey: "A", EndKey: "B"}), Txid: txid}})
+
+	if collection == "" {
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, queryStateNextFunc})
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, queryStateCloseFunc})
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}})
+	} else {
+		// Range queries on private data is not yet implemented.
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.ERROR, Message: "Not Yet Supported"}), Txid: txid}})
+	}
+
+	respSet := &mockpeer.MockResponseSet{errorFunc, nil, mkpeer}
 
 	cccid := ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
-	execCC(t, ctxt, ccSide, cccid, false, false, done, cis, respSet)
+	if collection == "" {
+		execCC(t, ctxt, ccSide, cccid, false, false, done, cis, respSet)
+	} else {
+		execCC(t, ctxt, ccSide, cccid, false, true, done, cis, respSet)
+	}
 
 	endTx(t, cccid, txsim, cis)
 
@@ -498,6 +600,14 @@ func cc2cc(t *testing.T, chainID, chainID2, ccname string, ccSide *mockpeer.Mock
 	txid := util.GenerateUUID()
 	//first deploy the new cc to LSCC
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
+
+	//setup CheckACL calls
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CC2CC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
+
 	cccid := ccprovider.NewCCContext(chainID, calledCC, "0", txid, false, sprop, prop)
 
 	deployCC(t, ctxt, cccid, cis.ChaincodeSpec)
@@ -511,6 +621,16 @@ func cc2cc(t *testing.T, chainID, chainID2, ccname string, ccSide *mockpeer.Mock
 	cis = &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
 	txid = util.GenerateUUID()
 	ctxt, txsim, sprop, prop = startTx(t, chainID, cis, txid)
+
+	//we want hooks for both chaincodes
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CC2CC, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.CC2CC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
 
 	if _, _, err := ccprovider.GetChaincodeProvider().GetCCValidationInfoFromLSCC(ctxt, "getccdata", sprop, prop, chainID, calledCC); err != nil {
 		t.Fatalf("Could not get chaincode data from lscc for %s: %s", calledCC, err)
@@ -534,10 +654,40 @@ func cc2cc(t *testing.T, chainID, chainID2, ccname string, ccSide *mockpeer.Mock
 
 	endTx(t, cccid, txsim, cis)
 
+	//finally lets try a Bad ACL with CC-calling-CC
+	chaincodeID = &pb.ChaincodeID{Name: ccname, Version: "0"}
+	ci = &pb.ChaincodeInput{[][]byte{[]byte("invokecc")}, nil}
+	cis = &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
+	txid = util.GenerateUUID()
+	ctxt, txsim, sprop, prop = startTx(t, chainID, cis, txid)
+
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CC2CC, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.CC2CC, chainID, sprop).Return(errors.New("Bad ACL calling CC"))
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID2, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
+	//call regular cc but without ACL on called CC
+	respSet = &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_INVOKE_CHAINCODE, Payload: putils.MarshalOrPanic(&pb.ChaincodeSpec{ChaincodeId: &pb.ChaincodeID{Name: "calledCC:0/" + chainID}, Input: &pb.ChaincodeInput{Args: [][]byte{[]byte{}}}}), Txid: txid}}}}
+
+	respSet2 = &mockpeer.MockResponseSet{nil, nil, []*mockpeer.MockResponse{
+		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}}}}
+
+	calledCCSide.SetResponses(respSet2)
+
+	cccid = ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
+
+	execCC(t, ctxt, ccSide, cccid, false, true, done, cis, respSet)
+
+	endTx(t, cccid, txsim, cis)
+
 	return nil
 }
 
-func getQueryResult(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCComm) error {
+func getQueryResult(t *testing.T, collection, chainID, ccname string, ccSide *mockpeer.MockCCComm) error {
 	done := setuperror()
 
 	errorFunc := func(ind int, err error) {
@@ -549,6 +699,11 @@ func getQueryResult(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockC
 	cis := &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
 	txid := util.GenerateUUID()
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
+
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
 
 	kvs := make([]*plgr.KV, 1000)
 	for i := 0; i < 1000; i++ {
@@ -573,15 +728,27 @@ func getQueryResult(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockC
 		return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_QUERY_STATE_CLOSE, Payload: putils.MarshalOrPanic(&pb.QueryStateClose{Id: qr.Id}), Txid: txid}
 	}
 
-	respSet := &mockpeer.MockResponseSet{errorFunc, nil, []*mockpeer.MockResponse{
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_QUERY_RESULT, Payload: putils.MarshalOrPanic(&pb.GetQueryResult{Query: "goodquery"}), Txid: txid}},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, queryStateNextFunc},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, queryStateNextFunc},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, queryStateCloseFunc},
-		&mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}}}}
+	var mkpeer []*mockpeer.MockResponse
+
+	mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_TRANSACTION}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_GET_QUERY_RESULT, Payload: putils.MarshalOrPanic(&pb.GetQueryResult{Collection: "", Query: "goodquery"}), Txid: txid}})
+
+	if collection == "" {
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, queryStateNextFunc})
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, queryStateCloseFunc})
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.OK, Payload: []byte("OK")}), Txid: txid}})
+	} else {
+		// Get query results on private data is not yet implemented.
+		mkpeer = append(mkpeer, &mockpeer.MockResponse{&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR}, &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_COMPLETED, Payload: putils.MarshalOrPanic(&pb.Response{Status: shim.ERROR, Message: "Not Yet Supported"}), Txid: txid}})
+	}
+
+	respSet := &mockpeer.MockResponseSet{errorFunc, nil, mkpeer}
 
 	cccid := ccprovider.NewCCContext(chainID, ccname, "0", txid, false, sprop, prop)
-	execCC(t, ctxt, ccSide, cccid, false, false, done, cis, respSet)
+	if collection == "" {
+		execCC(t, ctxt, ccSide, cccid, false, false, done, cis, respSet)
+	} else {
+		execCC(t, ctxt, ccSide, cccid, false, true, done, cis, respSet)
+	}
 
 	endTx(t, cccid, txsim, cis)
 
@@ -600,6 +767,11 @@ func getHistory(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCCom
 	cis := &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: chaincodeID, Input: ci}}
 	txid := util.GenerateUUID()
 	ctxt, txsim, sprop, prop := startTx(t, chainID, cis, txid)
+
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETDEPSPEC, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, sprop).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, sprop).Return(nil)
 
 	kvs := make([]*plgr.KV, 1000)
 	for i := 0; i < 1000; i++ {
@@ -639,33 +811,118 @@ func getHistory(t *testing.T, chainID, ccname string, ccSide *mockpeer.MockCCCom
 	return nil
 }
 
-func getArgsAndEnv(t *testing.T, auth accesscontrol.Authenticator) {
+func getLaunchConfigs(t *testing.T, auth accesscontrol.Authenticator) {
 	newCCSupport := &ChaincodeSupport{peerTLS: true, chaincodeLogLevel: "debug", shimLogLevel: "info"}
 
 	//set the authenticator for generating TLS stuff
 	newCCSupport.auth = auth
 
 	ccContext := ccprovider.NewCCContext("dummyChannelId", "mycc", "v0", "dummyTxid", false, nil, nil)
-	args, envs, err := newCCSupport.getArgsAndEnv(ccContext, pb.ChaincodeSpec_NODE)
+	args, envs, filesToUpload, err := newCCSupport.getLaunchConfigs(ccContext, pb.ChaincodeSpec_GOLANG)
 	if err != nil {
-		t.Fatalf("calling getArgsAndEnv() failed with error %s", err)
+		t.Fatalf("calling getLaunchConfigs() failed with error %s", err)
 	}
 
-	if len(args) != 3 {
-		t.Fatalf("calling getArgsAndEnv() should have returned an array of 3 elements for Args, but got %v", args)
+	if len(args) != 2 {
+		t.Fatalf("calling getLaunchConfigs() for golang chaincode should have returned an array of 2 elements for Args, but got %v", args)
 	}
-
-	if args[0] != "/bin/sh" || args[1] != "-c" && !strings.HasPrefix(args[2], "cd /usr/local/src; node chaincode.js --peer.address") {
-		t.Fatalf("calling getArgsAndEnv() should have returned the start command for node.js chaincode, but got %v", args)
+	if args[0] != "chaincode" || !strings.HasPrefix(args[1], "-peer.address") {
+		t.Fatalf("calling getLaunchConfigs() should have returned the start command for golang chaincode, but got %v", args)
 	}
-
-	if len(envs) != 4 {
-		t.Fatalf("calling getArgsAndEnv() should have returned an array of 4 elements for Envs, but got %v", envs)
+	if len(envs) != 6 {
+		t.Fatalf("calling getLaunchConfigs() with TLS enabled should have returned an array of 6 elements for Envs, but got %v", envs)
 	}
-
 	if envs[0] != "CORE_CHAINCODE_ID_NAME=mycc:v0" || envs[1] != "CORE_PEER_TLS_ENABLED=true" ||
+		envs[2] != "CORE_TLS_CLIENT_KEY_PATH=/etc/hyperledger/fabric/client.key" || envs[3] != "CORE_TLS_CLIENT_CERT_PATH=/etc/hyperledger/fabric/client.crt" ||
+		envs[4] != "CORE_CHAINCODE_LOGGING_LEVEL=debug" || envs[5] != "CORE_CHAINCODE_LOGGING_SHIM=info" {
+		t.Fatalf("calling getLaunchConfigs() with TLS enabled should have returned the proper environment variables, but got %v", envs)
+	}
+	if len(filesToUpload) != 2 {
+		t.Fatalf("calling getLaunchConfigs() with TLS enabled should have returned an array of 2 elements for filesToUpload, but got %v", len(filesToUpload))
+	}
+
+	args, envs, _, err = newCCSupport.getLaunchConfigs(ccContext, pb.ChaincodeSpec_NODE)
+	if len(args) != 3 {
+		t.Fatalf("calling getLaunchConfigs() for node chaincode should have returned an array of 3 elements for Args, but got %v", args)
+	}
+
+	if args[0] != "/bin/sh" || args[1] != "-c" || !strings.HasPrefix(args[2], "cd /usr/local/src; npm start -- --peer.address") {
+		t.Fatalf("calling getLaunchConfigs() should have returned the start command for node.js chaincode, but got %v", args)
+	}
+
+	newCCSupport.peerTLS = false
+	args, envs, _, err = newCCSupport.getLaunchConfigs(ccContext, pb.ChaincodeSpec_GOLANG)
+	if len(envs) != 4 {
+		t.Fatalf("calling getLaunchConfigs() with TLS disabled should have returned an array of 4 elements for Envs, but got %v", envs)
+	}
+	if envs[0] != "CORE_CHAINCODE_ID_NAME=mycc:v0" || envs[1] != "CORE_PEER_TLS_ENABLED=false" ||
 		envs[2] != "CORE_CHAINCODE_LOGGING_LEVEL=debug" || envs[3] != "CORE_CHAINCODE_LOGGING_SHIM=info" {
-		t.Fatalf("calling getArgsAndEnv() should have returned the proper environment variables, but got %v", envs)
+		t.Fatalf("calling getLaunchConfigs() with TLS disabled should have returned the proper environment variables, but got %v", envs)
+	}
+}
+
+//success case
+func TestLaunchAndWaitSuccess(t *testing.T) {
+	newCCSupport := &ChaincodeSupport{peerTLS: true, chaincodeLogLevel: "debug", shimLogLevel: "info", ccStartupTimeout: time.Duration(500) * time.Millisecond, runningChaincodes: &runningChaincodes{chaincodeMap: make(map[string]*chaincodeRTEnv), launchStarted: make(map[string]bool)}, peerNetworkID: "networkID", peerID: "peerID"}
+	spec := &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: &pb.ChaincodeID{Name: "testcc", Version: "0"}}
+	code := getTarGZ(t, "src/dummy/dummy.go", []byte("code"))
+	cds := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: code}
+	cccid := ccprovider.NewCCContext("testchannel", "testcc", "0", "landwtimertest_txid", false, nil, nil)
+
+	//actual test - everythings good
+	launcher := &mockCCLauncher{execTime: nil, resp: container.VMCResp{}, retErr: nil, notfyb: true}
+	err := newCCSupport.launchAndWaitForRegister(context.Background(), cccid, cds, launcher)
+	if err != nil {
+		t.Fatalf("expected success but failed with error %s", err)
+	}
+}
+
+//test timeout error
+func TestLaunchAndWaitTimeout(t *testing.T) {
+	newCCSupport := &ChaincodeSupport{peerTLS: true, chaincodeLogLevel: "debug", shimLogLevel: "info", ccStartupTimeout: time.Duration(500) * time.Millisecond, runningChaincodes: &runningChaincodes{chaincodeMap: make(map[string]*chaincodeRTEnv), launchStarted: make(map[string]bool)}, peerNetworkID: "networkID", peerID: "peerID"}
+	spec := &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: &pb.ChaincodeID{Name: "testcc", Version: "0"}}
+	code := getTarGZ(t, "src/dummy/dummy.go", []byte("code"))
+	cds := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: code}
+	cccid := ccprovider.NewCCContext("testchannel", "testcc", "0", "landwtimertest_txid", false, nil, nil)
+
+	//the actual test - timeout 1000 > 500
+	sleepTime := time.Duration(1) * time.Second
+	launcher := &mockCCLauncher{execTime: &sleepTime, resp: container.VMCResp{}, retErr: nil, notfyb: true}
+	err := newCCSupport.launchAndWaitForRegister(context.Background(), cccid, cds, launcher)
+	if err == nil {
+		t.Fatalf("expected error but succeeded")
+	}
+}
+
+//test notification error case
+func TestLaunchAndWaitNotificationError(t *testing.T) {
+	newCCSupport := &ChaincodeSupport{peerTLS: true, chaincodeLogLevel: "debug", shimLogLevel: "info", ccStartupTimeout: time.Duration(500) * time.Millisecond, runningChaincodes: &runningChaincodes{chaincodeMap: make(map[string]*chaincodeRTEnv), launchStarted: make(map[string]bool)}, peerNetworkID: "networkID", peerID: "peerID"}
+	spec := &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: &pb.ChaincodeID{Name: "testcc", Version: "0"}}
+	code := getTarGZ(t, "src/dummy/dummy.go", []byte("code"))
+	cds := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: code}
+	cccid := ccprovider.NewCCContext("testchannel", "testcc", "0", "landwtimertest_txid", false, nil, nil)
+
+	//the actual test - notify false
+	launcher := &mockCCLauncher{execTime: nil, resp: container.VMCResp{}, retErr: nil, notfyb: false}
+	err := newCCSupport.launchAndWaitForRegister(context.Background(), cccid, cds, launcher)
+	if err == nil {
+		t.Fatalf("expected error but succeeded")
+	}
+}
+
+//test container return error
+func TestLaunchAndWaitLaunchError(t *testing.T) {
+	newCCSupport := &ChaincodeSupport{peerTLS: true, chaincodeLogLevel: "debug", shimLogLevel: "info", ccStartupTimeout: time.Duration(500) * time.Millisecond, runningChaincodes: &runningChaincodes{chaincodeMap: make(map[string]*chaincodeRTEnv), launchStarted: make(map[string]bool)}, peerNetworkID: "networkID", peerID: "peerID"}
+	spec := &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value["GOLANG"]), ChaincodeId: &pb.ChaincodeID{Name: "testcc", Version: "0"}}
+	code := getTarGZ(t, "src/dummy/dummy.go", []byte("code"))
+	cds := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: code}
+	cccid := ccprovider.NewCCContext("testchannel", "testcc", "0", "landwtimertest_txid", false, nil, nil)
+
+	//actual test - container launch gives error
+	launcher := &mockCCLauncher{execTime: nil, resp: container.VMCResp{Err: errors.New("Bad launch")}, retErr: nil}
+	err := newCCSupport.launchAndWaitForRegister(context.Background(), cccid, cds, launcher)
+	if err == nil {
+		t.Fatalf("expected error but succeeded")
 	}
 }
 
@@ -703,20 +960,23 @@ func TestCCFramework(t *testing.T) {
 	//call's invoke and do some GET
 	invokeCC(t, chainID, ccname, ccSide)
 
+	//call's invoke and do some GET/PUT/DEL on private data
+	invokePrivateDataGetPutDelCC(t, chainID, ccname, ccSide)
+
 	//call's query state range
-	getQueryStateByRange(t, chainID, ccname, ccSide)
+	getQueryStateByRange(t, "", chainID, ccname, ccSide)
 
 	//call's cc2cc (variation with syscc calls)
 	cc2cc(t, chainID, chainID2, ccname, ccSide)
 
 	//call's query result
-	getQueryResult(t, chainID, ccname, ccSide)
+	getQueryResult(t, "", chainID, ccname, ccSide)
 
 	//call's history result
 	getHistory(t, chainID, ccname, ccSide)
 
 	//just use the previous authhandler for generating TLS key/pair
-	getArgsAndEnv(t, theChaincodeSupport.auth)
+	getLaunchConfigs(t, theChaincodeSupport.auth)
 
 	ccSide.Quit()
 }

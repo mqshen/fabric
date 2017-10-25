@@ -9,6 +9,7 @@ package channelconfig
 import (
 	"time"
 
+	"github.com/hyperledger/fabric/common/capabilities"
 	configtxapi "github.com/hyperledger/fabric/common/configtx/api"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/msp"
@@ -38,6 +39,9 @@ type ApplicationOrg interface {
 type Application interface {
 	// Organizations returns a map of org ID to ApplicationOrg
 	Organizations() map[string]ApplicationOrg
+
+	// Capabilities defines the capabilities for the application portion of a channel
+	Capabilities() ApplicationCapabilities
 }
 
 // Channel gives read only access to the channel configuration
@@ -52,6 +56,9 @@ type Channel interface {
 
 	// OrdererAddresses returns the list of valid orderer addresses to connect to to invoke Broadcast/Deliver
 	OrdererAddresses() []string
+
+	// Capabilities defines the capabilities for a channel
+	Capabilities() ChannelCapabilities
 }
 
 // Consortiums represents the set of consortiums serviced by an ordering service
@@ -90,6 +97,39 @@ type Orderer interface {
 
 	// Organizations returns the organizations for the ordering service
 	Organizations() map[string]Org
+
+	// Capabilities defines the capabilities for the orderer portion of a channel
+	Capabilities() OrdererCapabilities
+}
+
+// ChannelCapabilities defines the capabilities for a channel
+type ChannelCapabilities interface {
+	// Supported returns an error if there are unknown capabilities in this channel which are required
+	Supported() error
+
+	// MSPVersion specifies the version of the MSP this channel must understand, including the MSP types
+	// and MSP principal types.
+	MSPVersion() capabilities.MSPVersion
+}
+
+// ApplicationCapabilities defines the capabilities for the application portion of a channel
+type ApplicationCapabilities interface {
+	// Supported returns an error if there are unknown capabilities in this channel which are required
+	Supported() error
+}
+
+// OrdererCapabilities defines the capabilities for the orderer portion of a channel
+type OrdererCapabilities interface {
+	// SetChannelModPolicyDuringCreate specifies whether the v1.0 undesirable behavior of setting the /Channel
+	// group's mod_policy to "" should be fixed or not.
+	SetChannelModPolicyDuringCreate() bool
+
+	// Resubmission specifies whether the v1.0 non-deterministic commitment of tx should be fixed by re-submitting
+	// the re-validated tx.
+	Resubmission() bool
+
+	// Supported returns an error if there are unknown capabilities in this channel which are required
+	Supported() error
 }
 
 // Resources is the common set of config resources for all channels

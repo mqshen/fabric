@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/localmsp"
+	"github.com/hyperledger/fabric/common/tools/configtxgen/encoder"
 	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	Kilo = 1024 // TODO(jay_guo) consider adding an unit pkg
+	// Kilo allows us to convert byte units to kB.
+	Kilo = 1024 // TODO Consider adding a unit pkg
 )
 
 var conf *config.TopLevel
@@ -46,7 +47,7 @@ func init() {
 	msp := mspmgmt.GetLocalMSP()
 	signer, err = msp.GetDefaultSigningIdentity()
 	if err != nil {
-		panic(fmt.Errorf("Failed to initialize get default signer: %s", err))
+		panic(fmt.Errorf("Failed to get default signer: %s", err))
 	}
 }
 
@@ -110,10 +111,11 @@ func CreateChannel(server *BenchmarkServer) string {
 	defer client.Close()
 
 	channelID := RandomID(10)
-	createChannelTx, _ := channelconfig.MakeChainCreationTransaction(
+	createChannelTx, _ := encoder.MakeChannelCreationTransaction(
 		channelID,
 		genesisconfig.SampleConsortiumName,
 		signer,
+		nil,
 		genesisconfig.SampleOrgName)
 	client.SendRequest(createChannelTx)
 	if client.GetResponse().Status != cb.Status_SUCCESS {

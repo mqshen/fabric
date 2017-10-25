@@ -30,6 +30,7 @@ import (
 
 	"sort"
 
+	"github.com/hyperledger/fabric/common/metadata"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/util"
 	cutil "github.com/hyperledger/fabric/core/container/util"
 	pb "github.com/hyperledger/fabric/protos/peer"
@@ -116,7 +117,7 @@ func (goPlatform *Platform) ValidateSpec(spec *pb.ChaincodeSpec) error {
 			return fmt.Errorf("error validating chaincode path: %s", err)
 		}
 		if !exists {
-			return fmt.Errorf("path to chaincode does not exist: %s", spec.ChaincodeId.Path)
+			return fmt.Errorf("path to chaincode does not exist: %s", pathToCheck)
 		}
 	}
 	return nil
@@ -290,10 +291,21 @@ func (goPlatform *Platform) GetDeploymentPayload(spec *pb.ChaincodeSpec) ([]byte
 		"github.com/hyperledger/fabric/protos/peer":         true,
 	}
 
+	// Golang "pseudo-packages" - packages which don't actually exist
+	var pseudo = map[string]bool{
+		"C": true,
+	}
+
 	imports = filter(imports, func(pkg string) bool {
 		// Drop if provided by CCENV
 		if _, ok := provided[pkg]; ok == true {
 			logger.Debugf("Discarding provided package %s", pkg)
+			return false
+		}
+
+		// Drop pseudo-packages
+		if _, ok := pseudo[pkg]; ok == true {
+			logger.Debugf("Discarding pseudo-package %s", pkg)
 			return false
 		}
 
@@ -446,11 +458,17 @@ func (goPlatform *Platform) GenerateDockerBuild(cds *pb.ChaincodeDeploymentSpec,
 	}
 
 	const ldflags = "-linkmode external -extldflags '-static'"
+	var gotags string
+	// check if experimental features are enabled
+	if metadata.Experimental == "true" {
+		gotags = " experimental"
+	}
+	logger.Infof("building chaincode with tags: %s", gotags)
 
 	codepackage := bytes.NewReader(cds.CodePackage)
 	binpackage := bytes.NewBuffer(nil)
 	err = util.DockerBuild(util.DockerBuildOptions{
-		Cmd:          fmt.Sprintf("GOPATH=/chaincode/input:$GOPATH go build -ldflags \"%s\" -o /chaincode/output/chaincode %s", ldflags, pkgname),
+		Cmd:          fmt.Sprintf("GOPATH=/chaincode/input:$GOPATH go build -tags \"%s\" -ldflags \"%s\" -o /chaincode/output/chaincode %s", gotags, ldflags, pkgname),
 		InputStream:  codepackage,
 		OutputStream: binpackage,
 	})

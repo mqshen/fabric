@@ -1,17 +1,7 @@
 /*
 Copyright IBM Corp. 2016 All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package endorser
@@ -30,12 +20,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric/protos/ledger/rwset"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	mockpolicies "github.com/hyperledger/fabric/common/mocks/policies"
+	//"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
+	"github.com/hyperledger/fabric/core/aclmgmt"
+	"github.com/hyperledger/fabric/core/aclmgmt/mocks"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
@@ -257,6 +252,9 @@ func deployOrUpgrade(endorserServer pb.EndorserServer, chainID string, spec *pb.
 		return nil, nil, err
 	}
 
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, signedProp).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, signedProp).Return(nil)
 	var resp *pb.ProposalResponse
 	resp, err = endorserServer.ProcessProposal(context.Background(), signedProp)
 
@@ -288,6 +286,9 @@ func invoke(chainID string, spec *pb.ChaincodeSpec) (*pb.Proposal, *pb.ProposalR
 		return nil, nil, "", nil, err
 	}
 
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, signedProp).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, signedProp).Return(nil)
 	resp, err := endorserServer.ProcessProposal(context.Background(), signedProp)
 	if err != nil {
 		return nil, nil, "", nil, err
@@ -316,6 +317,9 @@ func invokeWithOverride(txid string, chainID string, spec *pb.ChaincodeSpec, non
 		return nil, err
 	}
 
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.LSCC_GETCCDATA, chainID, signedProp).Return(nil)
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, chainID, signedProp).Return(nil)
 	resp, err := endorserServer.ProcessProposal(context.Background(), signedProp)
 	if err != nil {
 		return nil, fmt.Errorf("Error endorsing %s %s: %s\n", txid, spec.ChaincodeId, err)
@@ -362,10 +366,10 @@ func TestJavaDeploy(t *testing.T) {
 
 	_, _, err := deploy(endorserServer, chainID, spec, nil)
 	if err == nil {
-		t.Fail()
-		t.Logf("expected java CC deploy to fail")
-		chaincode.GetChain().Stop(context.Background(), cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
-		return
+		if !javaEnabled() {
+			t.Fail()
+			t.Logf("expected java CC deploy to fail")
+		}
 	}
 	chaincode.GetChain().Stop(context.Background(), cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
 }
@@ -499,7 +503,7 @@ func TestDeployAndInvoke(t *testing.T) {
 	_, err = invokeWithOverride(txid, chainID, spec, nonce)
 	if err == nil {
 		t.Fail()
-		t.Log("Replay attack protection faild. Transaction with duplicaged txid passed")
+		t.Log("Replay attack protection faild. Transaction with duplicated txid passed")
 		chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
 		return
 	}
@@ -662,9 +666,30 @@ func TestHeaderExtensionNoChaincodeID(t *testing.T) {
 	invocation := &pb.ChaincodeInvocationSpec{ChaincodeSpec: spec}
 	prop, _, _ := pbutils.CreateChaincodeProposalWithTxIDNonceAndTransient(txID, common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), invocation, []byte{1, 2, 3}, creator, nil)
 	signedProp, _ := getSignedProposal(prop, signer)
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, util.GetTestChainID(), signedProp).Return(nil)
 	_, err = endorserServer.ProcessProposal(context.Background(), signedProp)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ChaincodeHeaderExtension.ChaincodeId is nil")
+}
+
+//rest of the code tests good ACL. Lets now test bad ACL
+func TestResourceBasedACL(t *testing.T) {
+	creator, _ := signer.Serialize()
+	nonce := []byte{1, 2, 3}
+	digest, err := factory.GetDefault().Hash(append(nonce, creator...), &bccsp.SHA256Opts{})
+	txID := hex.EncodeToString(digest)
+	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeId: &pb.ChaincodeID{Path: "/path/to/mycc", Name: "mycc", Version: "0"}, Input: &pb.ChaincodeInput{Args: util.ToChaincodeArgs()}}
+	invocation := &pb.ChaincodeInvocationSpec{ChaincodeSpec: spec}
+	prop, _, _ := pbutils.CreateChaincodeProposalWithTxIDNonceAndTransient(txID, common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), invocation, []byte{1, 2, 3}, creator, nil)
+	signedProp, _ := getSignedProposal(prop, signer)
+
+	//return Bad ACL
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.PROPOSE, util.GetTestChainID(), signedProp).Return(errors.New("Bad ACL"))
+	_, err = endorserServer.ProcessProposal(context.Background(), signedProp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Bad ACL")
 }
 
 // TestAdminACLFail deploys tried to deploy a chaincode;
@@ -734,7 +759,14 @@ func newTempDir() string {
 	return tempDir
 }
 
+var mockAclProvider *mocks.MockACLProvider
+
 func TestMain(m *testing.M) {
+	mockAclProvider = &mocks.MockACLProvider{}
+	mockAclProvider.Reset()
+
+	aclmgmt.RegisterACLProvider(mockAclProvider)
+
 	setupTestConfig()
 
 	chainID := util.GetTestChainID()
@@ -746,7 +778,7 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	endorserServer = NewEndorserServer(func(channel string, txID string, privateData []byte) error {
+	endorserServer = NewEndorserServer(func(channel string, txID string, privateData *rwset.TxPvtReadWriteSet) error {
 		return nil
 	})
 

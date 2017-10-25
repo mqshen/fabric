@@ -34,6 +34,12 @@ var binaryWrapper = "valueBytes"
 // currently defaulted to 0 and is not used
 var querySkip = 0
 
+// BatchDocument defines a document for a batch
+type BatchableDocument struct {
+	CouchDoc couchdb.CouchDoc
+	Deleted  bool
+}
+
 // VersionedDBProvider implements interface VersionedDBProvider
 type VersionedDBProvider struct {
 	couchInstance *couchdb.CouchInstance
@@ -153,14 +159,27 @@ func (vdb *VersionedDB) GetState(namespace string, key string) (*statedb.Version
 }
 
 // GetVersion implements method in VersionedDB interface
-func (vdb *VersionedDB) GetVersion(namespace string, key string) (*version.Height, error) {
+func (vdb *VersionedDB) GetCachedVersion(namespace string, key string) (*version.Height, bool) {
+
+	logger.Debugf("Retrieving cached version: %s~%s", key, namespace)
 
 	compositeKey := statedb.CompositeKey{Namespace: namespace, Key: key}
 
 	// Retrieve the version from committed data cache.
 	// Since the cache was populated based on block readsets,
 	// checks during validation should find the version here
-	returnVersion, keyFound := vdb.committedDataCache.committedVersions[compositeKey]
+	version, keyFound := vdb.committedDataCache.committedVersions[compositeKey]
+
+	if !keyFound {
+		return nil, false
+	}
+	return version, true
+}
+
+// GetVersion implements method in VersionedDB interface
+func (vdb *VersionedDB) GetVersion(namespace string, key string) (*version.Height, error) {
+
+	returnVersion, keyFound := vdb.GetCachedVersion(namespace, key)
 
 	// If the version was not found in the committed data cache, retrieve it from statedb.
 	if !keyFound {
@@ -292,33 +311,99 @@ func (vdb *VersionedDB) ExecuteQuery(namespace, query string) (statedb.ResultsIt
 func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version.Height) error {
 
 	// STEP 1: GATHER DOCUMENT REVISION NUMBERS REQUIRED FOR THE COUCHDB BULK UPDATE
+	//         ALSO BUILD PROCESS BATCHES OF UPDATE DOCUMENTS BASED ON THE MAX BATCH SIZE
 
 	// initialize a missing key list
-	missingKeys := []*statedb.CompositeKey{}
+	var missingKeys []*statedb.CompositeKey
 
-	// Revision numbers are needed for couchdb updates.
-	// vdb.committedDataCache.revisionNumbers is a cache of revision numbers based on ID
-	// Document IDs and revision numbers will already be in the cache for read/writes,
-	// but will be missing in the case of blind writes.
-	// If the key is missing in the cache, then add the key to missingKeys
-	// A bulk read will then add the missing revisions to the cache
+	//initialize a processBatch for updating bulk documents
+	processBatch := statedb.NewUpdateBatch()
+
+	//get the max size of the batch from core.yaml
+	maxBatchSize := ledgerconfig.GetMaxBatchUpdateSize()
+
+	//initialize a counter to track the batch size
+	batchSizeCounter := 0
+
+	// Iterate through the batch passed in and create process batches
+	// using the max batch size
 	namespaces := batch.GetUpdatedNamespaces()
 	for _, ns := range namespaces {
 		nsUpdates := batch.GetUpdates(ns)
-		for k := range nsUpdates {
+		for k, vv := range nsUpdates {
+
+			//increment the batch size counter
+			batchSizeCounter++
+
 			compositeKey := statedb.CompositeKey{Namespace: ns, Key: k}
 
-			// check the cache to see if the key is missing
+			// Revision numbers are needed for couchdb updates.
+			// vdb.committedDataCache.revisionNumbers is a cache of revision numbers based on ID
+			// Document IDs and revision numbers will already be in the cache for read/writes,
+			// but will be missing in the case of blind writes.
+			// If the key is missing in the cache, then add the key to missingKeys
 			_, keyFound := vdb.committedDataCache.revisionNumbers[compositeKey]
 
 			if !keyFound {
 				// Add the key to the missing key list
+				// As there can be no duplicates in UpdateBatch, no need check for duplicates.
 				missingKeys = append(missingKeys, &compositeKey)
 			}
+
+			//add the record to the process batch
+			if vv.Value == nil {
+				processBatch.Delete(ns, k, vv.Version)
+			} else {
+				processBatch.Put(ns, k, vv.Value, vv.Version)
+			}
+
+			//Check to see if the process batch exceeds the max batch size
+			if batchSizeCounter >= maxBatchSize {
+
+				//STEP 2:  PROCESS EACH BATCH OF UPDATE DOCUMENTS
+
+				err := vdb.processUpdateBatch(processBatch, missingKeys)
+				if err != nil {
+					return err
+				}
+
+				//reset the batch size counter
+				batchSizeCounter = 0
+
+				//create a new process batch
+				processBatch = statedb.NewUpdateBatch()
+
+				// reset the missing key list
+				missingKeys = []*statedb.CompositeKey{}
+
+			}
+
 		}
 	}
 
-	// if there are missing keys, add them to the committed data cache
+	//STEP 3:  PROCESS ANY REMAINING DOCUMENTS
+	err := vdb.processUpdateBatch(processBatch, missingKeys)
+	if err != nil {
+		return err
+	}
+
+	// STEP 4: IF THERE WAS SUCCESS UPDATING COUCHDB, THEN RECORD A SAVEPOINT FOR THIS BLOCK HEIGHT
+
+	// Record a savepoint at a given height
+	err = vdb.recordSavepoint(height)
+	if err != nil {
+		logger.Errorf("Error during recordSavepoint: %s\n", err.Error())
+		return err
+	}
+
+	return nil
+}
+
+//ProcessUpdateBatch updates a batch
+func (vdb *VersionedDB) processUpdateBatch(updateBatch *statedb.UpdateBatch, missingKeys []*statedb.CompositeKey) error {
+
+	// An array of missing keys is passed in to the batch processing
+	// A bulk read will then add the missing revisions to the cache
 	if len(missingKeys) > 0 {
 
 		if logger.IsEnabledFor(logging.DEBUG) {
@@ -328,14 +413,15 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 		vdb.LoadCommittedVersions(missingKeys)
 	}
 
-	// STEP 2: CREATE COUCHDB DOCS FROM UPDATE SET THEN DO A BULK UPDATE IN COUCHDB
+	// STEP 1: CREATE COUCHDB DOCS FROM UPDATE SET THEN DO A BULK UPDATE IN COUCHDB
 
 	// Use the batchUpdateMap for tracking couchdb updates by ID
 	// this will be used in case there are retries required
 	batchUpdateMap := make(map[string]interface{})
 
+	namespaces := updateBatch.GetUpdatedNamespaces()
 	for _, ns := range namespaces {
-		nsUpdates := batch.GetUpdates(ns)
+		nsUpdates := updateBatch.GetUpdates(ns)
 		for k, vv := range nsUpdates {
 			compositeKey := constructCompositeKey(ns, k)
 
@@ -380,16 +466,18 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 			}
 
 			// Add the current docment to the update map
-			batchUpdateMap[string(compositeKey)] = couchDoc
+			batchUpdateMap[string(compositeKey)] = BatchableDocument{CouchDoc: *couchDoc, Deleted: isDelete}
 
 		}
 	}
 
 	if len(batchUpdateMap) > 0 {
 
+		//Add the documents to the batch update array
 		batchUpdateDocs := []*couchdb.CouchDoc{}
 		for _, updateDocument := range batchUpdateMap {
-			batchUpdateDocs = append(batchUpdateDocs, updateDocument.(*couchdb.CouchDoc))
+			batchUpdateDocument := updateDocument.(BatchableDocument)
+			batchUpdateDocs = append(batchUpdateDocs, &batchUpdateDocument.CouchDoc)
 		}
 
 		// Do the bulk update into couchdb
@@ -399,7 +487,7 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 			return err
 		}
 
-		// STEP 3: IF INDIVIDUAL DOCUMENTS IN THE BULK UPDATE DID NOT SUCCEED, TRY THEM INDIVIDUALLY
+		// STEP 2: IF INDIVIDUAL DOCUMENTS IN THE BULK UPDATE DID NOT SUCCEED, TRY THEM INDIVIDUALLY
 
 		// iterate through the response from CouchDB by document
 		for _, respDoc := range batchUpdateResp {
@@ -407,11 +495,23 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 			// If the document returned an error, retry the individual document
 			if respDoc.Ok != true {
 
-				// Save the individual document to couchdb
-				// Note that this will do retries as needed
-				_, err := vdb.db.SaveDoc(respDoc.ID, "", batchUpdateMap[respDoc.ID].(*couchdb.CouchDoc))
+				batchUpdateDocument := batchUpdateMap[respDoc.ID].(BatchableDocument)
 
-				// If the single document update with retries returns an error, then throw the error
+				var err error
+
+				// Check to see if the document was added to the batch as a delete type document
+				if batchUpdateDocument.Deleted {
+					// If this is a deleted document, then retry the delete
+					// If the delete fails due to a document not being found (404 error),
+					// the document has already been deleted and the DeleteDoc will not return an error
+					err = vdb.db.DeleteDoc(respDoc.ID, "")
+				} else {
+					// Save the individual document to couchdb
+					// Note that this will do retries as needed
+					_, err = vdb.db.SaveDoc(respDoc.ID, "", &batchUpdateDocument.CouchDoc)
+				}
+
+				// If the single document update or delete returns an error, then throw the error
 				if err != nil {
 
 					errorString := fmt.Sprintf("Error occurred while saving document ID = %v  Error: %s  Reason: %s\n",
@@ -419,19 +519,11 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 
 					logger.Errorf(errorString)
 					return fmt.Errorf(errorString)
+
 				}
 			}
 		}
 
-	}
-
-	// STEP 4: IF THERE WAS SUCCESS UPDATING COUCHDB, THEN RECORD A SAVEPOINT FOR THIS BLOCK HEIGHT
-
-	// Record a savepoint at a given height
-	err := vdb.recordSavepoint(height)
-	if err != nil {
-		logger.Errorf("Error during recordSavepoint: %s\n", err.Error())
-		return err
 	}
 
 	return nil
@@ -439,11 +531,11 @@ func (vdb *VersionedDB) ApplyUpdates(batch *statedb.UpdateBatch, height *version
 
 // printCompositeKeys is a convenience method to print readable log entries for arrays of pointers
 // to composite keys
-func printCompositeKeys(keyPointers []*statedb.CompositeKey) string {
+func printCompositeKeys(keys []*statedb.CompositeKey) string {
 
 	compositeKeyString := []string{}
-	for _, keyPointer := range keyPointers {
-		compositeKeyString = append(compositeKeyString, "["+keyPointer.Namespace+","+keyPointer.Key+"]")
+	for _, key := range keys {
+		compositeKeyString = append(compositeKeyString, "["+key.Namespace+","+key.Key+"]")
 	}
 	return strings.Join(compositeKeyString, ",")
 }
@@ -461,31 +553,53 @@ func (vdb *VersionedDB) LoadCommittedVersions(keys []*statedb.CompositeKey) {
 	keysToRetrieve := []string{}
 	for _, key := range keys {
 
+		logger.Debugf("Load into version cache: %s~%s", key.Key, key.Namespace)
+
 		// create composite key for couchdb
 		compositeDBKey := constructCompositeKey(key.Namespace, key.Key)
-		// add the composite key to the list of required keys
-		keysToRetrieve = append(keysToRetrieve, string(compositeDBKey))
 
+		// create the compositeKey
 		compositeKey := statedb.CompositeKey{Namespace: key.Namespace, Key: key.Key}
 
-		// initialize empty values for each key (revision numbers will not be in couchdb for new creates)
-		versionMap[compositeKey] = nil
-		revMap[compositeKey] = ""
-
-	}
-
-	documentMetadataArray, _ := vdb.db.BatchRetrieveDocumentMetadata(keysToRetrieve)
-
-	for _, documentMetadata := range documentMetadataArray {
-
-		if len(documentMetadata.Version) != 0 {
-			ns, key := splitCompositeKey([]byte(documentMetadata.ID))
-			compositeKey := statedb.CompositeKey{Namespace: ns, Key: key}
-
-			versionMap[compositeKey] = createVersionHeightFromVersionString(documentMetadata.Version)
-			revMap[compositeKey] = documentMetadata.Rev
+		// initialize an entry for each key.  Set the version to nil
+		_, versionFound := versionMap[compositeKey]
+		if !versionFound {
+			versionMap[compositeKey] = nil
 		}
+
+		// initialize empty values for each key (revision numbers will not be in couchdb for new creates)
+		_, revFound := revMap[compositeKey]
+		if !revFound {
+			revMap[compositeKey] = ""
+		}
+
+		// if the compositeKey was not found in the revision or version part of the cache, then add the key to the
+		// list of keys to be retrieved
+		if !revFound || !versionFound {
+			// add the composite key to the list of required keys
+			keysToRetrieve = append(keysToRetrieve, string(compositeDBKey))
+		}
+
 	}
+
+	// Call the batch retrieve if there is one or more keys to retrieve
+	if len(keysToRetrieve) > 0 {
+
+		documentMetadataArray, _ := vdb.db.BatchRetrieveDocumentMetadata(keysToRetrieve)
+
+		for _, documentMetadata := range documentMetadataArray {
+
+			if len(documentMetadata.Version) != 0 {
+				ns, key := splitCompositeKey([]byte(documentMetadata.ID))
+				compositeKey := statedb.CompositeKey{Namespace: ns, Key: key}
+
+				versionMap[compositeKey] = createVersionHeightFromVersionString(documentMetadata.Version)
+				revMap[compositeKey] = documentMetadata.Rev
+			}
+		}
+
+	}
+
 }
 
 func createVersionHeightFromVersionString(encodedVersion string) *version.Height {

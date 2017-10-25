@@ -9,6 +9,7 @@ package broadcast
 import (
 	"io"
 
+	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
@@ -18,7 +19,13 @@ import (
 	"github.com/pkg/errors"
 )
 
-var logger = logging.MustGetLogger("orderer/common/broadcast")
+const pkgLogID = "orderer/common/broadcast"
+
+var logger *logging.Logger
+
+func init() {
+	logger = flogging.MustGetLogger(pkgLogID)
+}
 
 // Handler defines an interface which handles broadcasts
 type Handler interface {
@@ -48,7 +55,7 @@ type Consenter interface {
 
 	// Configure accepts a reconfiguration or returns an error indicating the cause of failure
 	// It ultimately passes through to the consensus.Chain interface
-	Configure(configUpdateMsg *cb.Envelope, config *cb.Envelope, configSeq uint64) error
+	Configure(config *cb.Envelope, configSeq uint64) error
 }
 
 type handlerImpl struct {
@@ -106,16 +113,14 @@ func (bh *handlerImpl) Handle(srv ab.AtomicBroadcast_BroadcastServer) error {
 				return srv.Send(&ab.BroadcastResponse{Status: ClassifyError(err), Info: err.Error()})
 			}
 
-			err = processor.Configure(msg, config, configSeq)
+			err = processor.Configure(config, configSeq)
 			if err != nil {
 				logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s with SERVICE_UNAVAILABLE: rejected by Configure: %s", chdr.ChannelId, addr, err)
 				return srv.Send(&ab.BroadcastResponse{Status: cb.Status_SERVICE_UNAVAILABLE, Info: err.Error()})
 			}
 		}
 
-		if logger.IsEnabledFor(logging.DEBUG) {
-			logger.Debugf("[channel: %s] Broadcast has successfully enqueued message of type %s from %s", chdr.ChannelId, cb.HeaderType_name[chdr.Type], addr)
-		}
+		logger.Debugf("[channel: %s] Broadcast has successfully enqueued message of type %s from %s", chdr.ChannelId, cb.HeaderType_name[chdr.Type], addr)
 
 		err = srv.Send(&ab.BroadcastResponse{Status: cb.Status_SUCCESS})
 		if err != nil {

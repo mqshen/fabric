@@ -12,12 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric/protos/ledger/rwset"
+
 	"github.com/hyperledger/fabric/core/deliverservice"
 	"github.com/hyperledger/fabric/core/deliverservice/blocksprovider"
+	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/transientstore"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/election"
-	"github.com/hyperledger/fabric/gossip/identity"
 	"github.com/hyperledger/fabric/gossip/state"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -26,11 +28,19 @@ import (
 type transientStoreMock struct {
 }
 
-func (*transientStoreMock) Persist(txid string, endorserid string, endorsementBlkHt uint64, privateSimulationResults []byte) error {
+func (*transientStoreMock) PurgeByHeight(maxBlockNumToRetain uint64) error {
+	return nil
+}
+
+func (*transientStoreMock) Persist(txid string, blockHeight uint64, privateSimulationResults *rwset.TxPvtReadWriteSet) error {
 	panic("implement me")
 }
 
-func (transientStoreMock) GetSelfSimulatedTxPvtRWSetByTxid(txid string) (*transientstore.EndorserPvtSimulationResults, error) {
+func (*transientStoreMock) GetTxPvtRWSetByTxid(txid string, filter ledger.PvtNsCollFilter) (transientstore.RWSetScanner, error) {
+	panic("implement me")
+}
+
+func (*transientStoreMock) PurgeByTxids(txids []string) error {
 	panic("implement me")
 }
 
@@ -86,7 +96,7 @@ func TestLeaderYield(t *testing.T) {
 	// There isn't any orderer present so the leader peer won't be able to
 	// connect to the orderer, and should relinquish its leadership after a while.
 	// Make sure the other peer declares itself as the leader soon after.
-	deliverclient.SetReconnectTotalTimeThreshold(time.Second * 5)
+	viper.Set("peer.deliveryclient.reconnectTotalTimeThreshold", time.Second*5)
 	viper.Set("peer.gossip.useLeaderElection", true)
 	viper.Set("peer.gossip.orgLeader", false)
 	n := 2
@@ -109,12 +119,14 @@ func TestLeaderYield(t *testing.T) {
 			chains:          make(map[string]state.GossipStateProvider),
 			leaderElection:  make(map[string]election.LeaderElectionService),
 			deliveryFactory: &embeddingDeliveryServiceFactory{&deliveryFactoryImpl{}},
-			idMapper:        identity.NewIdentityMapper(mcs, peerIdentity),
 			peerIdentity:    peerIdentity,
 			secAdv:          &secAdvMock{},
 		}
 		gossipServiceInstance = gs
-		gs.InitializeChannel(channelName, &mockLedgerInfo{1}, &transientStoreMock{}, []string{"localhost:7050"})
+		gs.InitializeChannel(channelName, []string{"localhost:7050"}, Support{
+			Committer: &mockLedgerInfo{1},
+			Store:     &transientStoreMock{},
+		})
 		return gs
 	}
 
@@ -139,8 +151,8 @@ func TestLeaderYield(t *testing.T) {
 		return -1
 	}
 
-	ds0 := p0.deliveryService.(*embeddingDeliveryService)
-	ds1 := p1.deliveryService.(*embeddingDeliveryService)
+	ds0 := p0.deliveryService[channelName].(*embeddingDeliveryService)
+	ds1 := p1.deliveryService[channelName].(*embeddingDeliveryService)
 
 	// Wait for p0 to connect to the ordering service
 	ds0.waitForDeliveryServiceActivation()
@@ -159,6 +171,6 @@ func TestLeaderYield(t *testing.T) {
 	assert.Equal(t, 1, getLeader())
 	p0.chains[channelName].Stop()
 	p1.chains[channelName].Stop()
-	p0.deliveryService.Stop()
-	p1.deliveryService.Stop()
+	p0.deliveryService[channelName].Stop()
+	p1.deliveryService[channelName].Stop()
 }

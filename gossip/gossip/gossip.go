@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package gossip
 
 import (
-	"time"
-
 	"crypto/tls"
+	"fmt"
+	"time"
 
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/comm"
@@ -24,6 +24,9 @@ type Gossip interface {
 
 	// Send sends a message to remote peers
 	Send(msg *proto.GossipMessage, peers ...*comm.RemotePeer)
+
+	// SendByCriteria sends a given message to all peers that match the given SendCriteria
+	SendByCriteria(*proto.SignedGossipMessage, SendCriteria) error
 
 	// GetPeers returns the NetworkMembers considered alive
 	Peers() []discovery.NetworkMember
@@ -56,12 +59,33 @@ type Gossip interface {
 	// JoinChan makes the Gossip instance join a channel
 	JoinChan(joinMsg api.JoinChannelMessage, chainID common.ChainID)
 
+	// LeaveChan makes the Gossip instance leave a channel.
+	// It still disseminates stateInfo message, but doesn't participate
+	// in block pulling anymore, and can't return anymore a list of peers
+	// in the channel.
+	LeaveChan(chainID common.ChainID)
+
 	// SuspectPeers makes the gossip instance validate identities of suspected peers, and close
 	// any connections to peers with identities that are found invalid
 	SuspectPeers(s api.PeerSuspector)
 
 	// Stop stops the gossip component
 	Stop()
+}
+
+// SendCriteria defines how to send a specific message
+type SendCriteria struct {
+	Timeout    time.Duration        // Timeout defines the time to wait for acknowledgements
+	MinAck     int                  // MinAck defines the amount of peers to collect acknowledgements from
+	MaxPeers   int                  // MaxPeers defines the maximum number of peers to send the message to
+	IsEligible filter.RoutingFilter // IsEligible defines whether a specific peer is eligible of receiving the message
+	Channel    common.ChainID       // Channel specifies a channel to send this message on. \
+	// Only peers that joined the channel would receive this message
+}
+
+// String returns a string representation of this SendCriteria
+func (sc SendCriteria) String() string {
+	return fmt.Sprintf("channel: %s, tout: %v, minAck: %d, maxPeers: %d", sc.Channel, sc.Timeout, sc.MinAck, sc.MaxPeers)
 }
 
 // Config is the configuration of the gossip component

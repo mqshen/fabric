@@ -19,11 +19,10 @@ package chaincode
 import (
 	"context"
 
-	"fmt"
-
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/ledger"
 	pb "github.com/hyperledger/fabric/protos/peer"
+	"github.com/pkg/errors"
 )
 
 // ccProviderFactory implements the ccprovider.ChaincodeProviderFactory
@@ -44,7 +43,6 @@ func init() {
 
 // ccProviderImpl is an implementation of the ccprovider.ChaincodeProvider interface
 type ccProviderImpl struct {
-	txsim ledger.TxSimulator
 }
 
 // ccProviderContextImpl contains the state that is passed around to calls to methods of ccProviderImpl
@@ -53,15 +51,15 @@ type ccProviderContextImpl struct {
 }
 
 // GetContext returns a context for the supplied ledger, with the appropriate tx simulator
-func (c *ccProviderImpl) GetContext(ledger ledger.PeerLedger, txid string) (context.Context, error) {
+func (c *ccProviderImpl) GetContext(ledger ledger.PeerLedger, txid string) (context.Context, ledger.TxSimulator, error) {
 	var err error
 	// get context for the chaincode execution
-	c.txsim, err = ledger.NewTxSimulator(txid)
+	txsim, err := ledger.NewTxSimulator(txid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	ctxt := context.WithValue(context.Background(), TXSimulatorKey, c.txsim)
-	return ctxt, nil
+	ctxt := context.WithValue(context.Background(), TXSimulatorKey, txsim)
+	return ctxt, txsim, nil
 }
 
 // GetCCContext returns an interface that encapsulates a
@@ -87,7 +85,7 @@ func (c *ccProviderImpl) GetCCValidationInfoFromLSCC(ctxt context.Context, txid 
 	}
 
 	if data == nil || data.Vscc == "" || data.Policy == nil {
-		return "", nil, fmt.Errorf("Incorrect validation info in LSCC")
+		return "", nil, errors.New("incorrect validation info in LSCC")
 	}
 
 	return data.Vscc, data.Policy, nil
@@ -114,9 +112,4 @@ func (c *ccProviderImpl) Stop(ctxt context.Context, cccid interface{}, spec *pb.
 		return theChaincodeSupport.Stop(ctxt, cccid.(*ccProviderContextImpl).ctx, spec)
 	}
 	panic("ChaincodeSupport not initialized")
-}
-
-// ReleaseContext frees up resources held by the context
-func (c *ccProviderImpl) ReleaseContext() {
-	c.txsim.Done()
 }
